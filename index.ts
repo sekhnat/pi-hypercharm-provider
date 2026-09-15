@@ -33,9 +33,11 @@
  *   The right side compresses across progressive tiers as the terminal
  *   narrows. The balance flips to a ⚠ warning at/below lowBalanceHc.
  *
- *   Lifecycle (mirrors pi-neuralwatt-provider): nothing renders before this
- *   session's first HyperCharm turn completes, so fresh sessions and other
- *   providers' sessions see no half-empty line. Credits/team are prefetched
+ *   Lifecycle (mirrors pi-neuralwatt-provider): the footer widget/status bar
+ *   render nothing before this session's first HyperCharm turn completes, so
+ *   fresh sessions and other providers' sessions see no half-empty line; the
+ *   Atelier sidebar panel instead publishes as soon as a HyperCharm model is
+ *   active, with a placeholder row until real data lands. Credits/team are prefetched
  *   on session start or model select when a HyperCharm model is active, so
  *   the first turn ends with data already cached. The balance is polled
  *   again on pi's agent_settled event (fires only once no automatic retry,
@@ -122,7 +124,7 @@ import {
 	applyOptimisticSpend,
 	buildAccountTiers,
 	buildSessionLine,
-	buildSidebarRows,
+	buildSidebarPanel,
 	coerceStatusConfig,
 	DEFAULT_STATUS_CONFIG,
 	EMPTY_ACCOUNT,
@@ -131,7 +133,6 @@ import {
 	accountHasData,
 	type AccountState,
 	type SessionStats,
-	type SidebarRow,
 	type StatusConfig,
 } from "./status";
 import { createSidebarUsagePublisher, type EventTransport, type SidebarUsagePublisher } from "./sidebar";
@@ -590,35 +591,31 @@ function renderStatus(ctx: ExtensionContext): void {
 	const accTiers = accountVisible ? buildAccountTiers(account, lowBalance) : [];
 
 	// Sidebar panel: parts targeted at "sidebar" publish here whenever a
-	// compatible host is present, gated on the active provider (the legacy
-	// hideOnOtherProvider option governs only widget/statusbar). Without a
+	// compatible host is present and a HyperCharm model is active — panel
+	// visibility follows model selection, not session activity, so the panel
+	// loads the moment a HyperCharm model is selected and a placeholder row
+	// covers the idle window before any usage data lands. The legacy
+	// hideOnOtherProvider option governs only widget/statusbar. Without a
 	// compatible host, sidebar parts fall back to the widget below. Each
 	// metric lands in exactly one destination because routing switches on the
-	// part's mode.
+	// part's mode (buildSidebarPanel enforces this).
 	const sidebarCompatible = publisher().isCompatible() && isHyperCharmActive;
-	const sessionInSidebar = statusConfig.session === "sidebar" && sidebarCompatible;
-	const accountInSidebar = statusConfig.account === "sidebar" && sidebarCompatible;
-	if (sidebarCompatible && (statusConfig.session === "sidebar" || statusConfig.account === "sidebar")) {
-		const sidebarRows: SidebarRow[] = [];
-		if (hasActivity && statusConfig.session === "sidebar") {
-			const line = buildSessionLine(sessionStats);
-			if (line) sidebarRows.push({ text: line, role: "muted" });
-		}
-		if (statusConfig.account === "sidebar" && accountVisible) {
-			// Account atoms directly (balance + limits row); the session row is
-			// handled above, so pass empty stats to skip it rather than slicing.
-			sidebarRows.push(...buildSidebarRows(EMPTY_SESSION_STATS, account, lowBalance));
-		}
-		if (sidebarRows.length > 0) {
-			publisher().update({
-				id: "hypercharm:usage",
-				title: "HyperCharm",
-				rows: sidebarRows,
-				defaults: { visible: true, after: "usage" },
-			});
-		} else {
-			publisher().withdraw();
-		}
+	const panel = buildSidebarPanel({
+		compatible: publisher().isCompatible(),
+		isProviderActive: isHyperCharmActive,
+		sessionMode: statusConfig.session,
+		accountMode: statusConfig.account,
+		sessionStats,
+		account,
+		lowBalance,
+	});
+	if (panel.publish) {
+		publisher().update({
+			id: "hypercharm:usage",
+			title: "HyperCharm",
+			rows: panel.rows,
+			defaults: { visible: true, after: "usage" },
+		});
 	} else {
 		// Sidebar parts fall back to the widget without a compatible host, or
 		// withdraw entirely while another provider is active.
@@ -926,7 +923,7 @@ export default function (pi: ExtensionAPI) {
 
 		loadStatusConfig();
 		resetStatusState();
-		updateStatus(ctx); // clears any carryover; activity-gated, renders nothing yet
+		updateStatus(ctx); // clears carryover; publishes the panel when a HyperCharm model is active
 		// Re-register so our identity (custom api + streamSimple) always wins
 		// over anything that touched provider registration during load.
 		pi.registerProvider(PROVIDER_ID, makeProviderConfig());

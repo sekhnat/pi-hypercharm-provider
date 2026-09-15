@@ -12,12 +12,14 @@ import {
 	accountHasData,
 	applyOptimisticSpend,
 	buildAccountTiers,
+	buildSidebarPanel,
 	buildSidebarRows,
 	buildSessionLine,
 	coerceStatusConfig,
 	formatBalHc,
 	formatRateCompact,
 	formatSpendHc,
+	SIDEBAR_PLACEHOLDER_ROW,
 	termVisWidth,
 	truncateAnsi,
 	type AccountState,
@@ -195,5 +197,56 @@ assert.equal(coerceStatusConfig({ lowBalanceHc: 42 }).lowBalanceHc, 42);
 assert.equal(coerceStatusConfig({ lowBalanceHc: false }).lowBalanceHc, null);
 assert.deepEqual(coerceStatusConfig(null).session, "sidebar");
 assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).session, "sidebar");
+
+// ── sidebar panel publication decision ──
+{
+	const base = {
+		compatible: true,
+		isProviderActive: true,
+		sessionMode: "sidebar" as const,
+		accountMode: "sidebar" as const,
+		sessionStats: EMPTY_SESSION_STATS,
+		account: acc({}),
+		lowBalance: false,
+	};
+	// idle session, no data: placeholder keeps the panel visible
+	const idle = buildSidebarPanel(base);
+	assert.equal(idle.publish, true);
+	assert.deepEqual(idle.rows, [{ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" }]);
+
+	// account rows land after the prefetch without any turn
+	const prefetched = buildSidebarPanel({ ...base, account: full });
+	assert.deepEqual(prefetched.rows, [
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+	]);
+
+	// session row appears once activity exists
+	const active = buildSidebarPanel({ ...base, sessionStats: { requests: 7, spendHc: 1.24 }, account: full });
+	assert.deepEqual(active.rows, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+	]);
+
+	// withdraw while another provider is active or the host is incompatible
+	assert.deepEqual(buildSidebarPanel({ ...base, isProviderActive: false }), { publish: false, rows: [] });
+	assert.deepEqual(buildSidebarPanel({ ...base, compatible: false }), { publish: false, rows: [] });
+
+	// no panel when neither part targets the sidebar
+	assert.equal(buildSidebarPanel({ ...base, sessionMode: "widget", accountMode: "widget" }).publish, false);
+	assert.equal(buildSidebarPanel({ ...base, sessionMode: "statusbar", accountMode: "off" }).publish, false);
+
+	// session part off-sidebar: account-only panel, no duplicated session row
+	const accountOnly = buildSidebarPanel({ ...base, sessionMode: "widget", account: full });
+	assert.deepEqual(accountOnly.rows, [
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+	]);
+
+	// low balance flips the account row role
+	const lowBal = buildSidebarPanel({ ...base, account: { ...EMPTY_ACCOUNT, balance: 10 }, lowBalance: true });
+	assert.deepEqual(lowBal.rows, [{ text: "◆ 10 hc", role: "warning" }]);
+}
 
 console.log("status.smoke: all assertions passed");

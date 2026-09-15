@@ -230,6 +230,63 @@ export function buildSidebarRows(stats: SessionStats, acc: AccountState, lowBala
 	return rows;
 }
 
+// ─── Sidebar panel publication decision ───────────────────────────────────────
+
+/** Muted row shown when the panel publishes before any usage data exists. */
+export const SIDEBAR_PLACEHOLDER_ROW = "no usage yet this session";
+
+export interface SidebarPanelOptions {
+	/** A defaults-capable Atelier host has been discovered. */
+	compatible: boolean;
+	/** A HyperCharm model is the active model (an unreadable provider counts as active). */
+	isProviderActive: boolean;
+	/** Display mode of the session spend/requests part. */
+	sessionMode: DisplayMode;
+	/** Display mode of the account balance/limits part. */
+	accountMode: DisplayMode;
+	sessionStats: SessionStats;
+	account: AccountState;
+	/** Balance is at/below the low-balance threshold (drives the row role). */
+	lowBalance: boolean;
+}
+
+export interface SidebarPanelDecision {
+	/** Whether the panel should be published; false means withdraw. */
+	publish: boolean;
+	/** Rows for the published panel; never empty when publish is true. */
+	rows: SidebarRow[];
+}
+
+/**
+ * Decide the sidebar panel for one render. Visibility follows the active
+ * model, not session activity: an idle session still publishes (a placeholder
+ * row when nothing has landed yet), so the panel appears at selection time
+ * rather than after the first turn. The widget/statusbar activity gates live
+ * in index.ts and are unaffected. Each metric lands in exactly one
+ * destination, so the session row is built here only when the session part
+ * targets the sidebar, and the account rows are built from empty stats for
+ * the same reason.
+ */
+export function buildSidebarPanel(options: SidebarPanelOptions): SidebarPanelDecision {
+	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance } = options;
+	if (!compatible || !isProviderActive) return { publish: false, rows: [] };
+	if (sessionMode !== "sidebar" && accountMode !== "sidebar") return { publish: false, rows: [] };
+	const rows: SidebarRow[] = [];
+	if (sessionMode === "sidebar") {
+		const line = buildSessionLine(sessionStats);
+		if (line) rows.push({ text: line, role: "muted" });
+	}
+	if (accountMode === "sidebar" && accountHasData(account)) {
+		// Account atoms only (balance + limits row); the session row above owns
+		// session stats so a metric never renders in two destinations.
+		rows.push(...buildSidebarRows(EMPTY_SESSION_STATS, account, lowBalance));
+	}
+	if (rows.length === 0) {
+		rows.push({ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" });
+	}
+	return { publish: true, rows };
+}
+
 // ─── Terminal width math ──────────────────────────────────────────────────────
 // Adapted from pi-neuralwatt-provider: ANSI-aware, wide-glyph-aware column
 // counting. ◆ is ambiguous-width but this terminal class renders it wide.

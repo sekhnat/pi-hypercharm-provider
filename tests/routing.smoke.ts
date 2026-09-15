@@ -298,16 +298,44 @@ async function sessionStart(h: Harness): Promise<void> {
 	assert.equal(unregisters(h).length, 1, "panel unregistered on provider switch");
 }
 
-// Panel stays absent before first activity even with a compatible host.
+// Panel publishes at selection time, before any turn: visibility follows
+// the active model, not session activity.
 {
 	resetSidebarRevisionsForTest();
 	const h = makeHarness();
 	await h.boot();
 	await sessionStart(h);
+	await settlePromises(); // the credits prefetch lands without any turn
+	// The config file was read at module load (before this harness's agent-dir
+	// isolation), so set both parts explicitly instead of relying on defaults.
+	await h.runCommand("session sidebar");
+	await h.runCommand("account sidebar");
 	await h.discover(["panel-defaults-v1"]);
-	// No turn: renderStatus runs via model_select but gates on activity.
 	await h.selectModel("hypercharm");
-	assert.equal(registers(h).length, 0, "no publish before activity");
+	const panel = sidebarPanel(h);
+	assert.equal(panel?.id, "hypercharm:usage", "panel published on model selection without a turn");
+	assert.deepEqual(panel?.rows.at(0), { text: "◆ 249 hc", role: "ready" });
+	assert.equal(h.widget.value, undefined, "widget still gated on activity");
+	assert.equal(h.statuses.get("hypercharm-session"), undefined, "status bar still gated on activity");
+}
+
+// Idle session with no account data: the panel still publishes so the sidebar
+// loads at selection time, carrying a placeholder row until data lands.
+{
+	resetSidebarRevisionsForTest();
+	const h = makeHarness();
+	await h.boot();
+	await h.runCommand("session sidebar");
+	await h.runCommand("account sidebar");
+	await h.discover(["panel-defaults-v1"]);
+	// session_start resets usage state and publishes synchronously, before the
+	// prefetch chain can fill the account.
+	await sessionStart(h);
+	const panel = sidebarPanel(h);
+	assert.equal(panel?.id, "hypercharm:usage");
+	assert.deepEqual(panel?.rows, [{ text: "no usage yet this session", role: "muted" }]);
+	await h.selectModel("hypercharm");
+	assert.ok(sidebarPanel(h), "panel stays published across re-renders");
 	assert.equal(h.widget.value, undefined, "no widget before activity");
 }
 
