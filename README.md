@@ -257,14 +257,14 @@ node scripts/update-models.js
 ```
 
 This will:
-1. Fetch models from `https://hyper.charm.land/v1/models`
+1. Fetch models from `https://hyper.charm.land/v1/provider`
 2. Regenerate `models.json` as pure metadata from Charm's typed `/v1/provider` catalog
 3. Apply overrides from `patch.json` only when building the README
 4. Remove custom models now available upstream from `custom-models.json`
 5. Reconcile delisted models through the 14-day `deprecated-models.json` grace layer
 6. Update `models.json` and the README model table
 
-A GitHub Actions workflow runs this daily and creates a PR if models have changed.
+Model updates are committed manually after running the script. The check suite (typecheck + smoke tests) runs in CI on every push and pull request.
 
 ## License
 
