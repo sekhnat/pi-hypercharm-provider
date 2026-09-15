@@ -5,11 +5,13 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM"],
     "esModuleInterop": true,
-    "strict": false,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["./*.ts"],
-  "exclude": ["node_modules", "tests"]
+  "include": ["./*.ts", "tests/*.ts"],
+  "exclude": ["node_modules"]
 }

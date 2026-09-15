@@ -27,7 +27,7 @@ import fs from 'fs';
 import os from 'os';
 import { execSync } from 'child_process';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { buildModels, reconcileDeprecated, transformApiModel } from '../model-catalog.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,7 +52,7 @@ const AUTH_JSON_PATH = path.join(piAgentDir(), 'auth.json');
  * literal "$", "$!" a literal "!"); anything else is a literal. Returns
  * undefined when a referenced env var is unset or a command fails.
  */
-function resolveConfigValue(config, env) {
+export function resolveConfigValue(config, env) {
   if (typeof config !== 'string' || config.length === 0) return undefined;
   if (config.startsWith('!')) {
     try {
@@ -119,7 +119,7 @@ function resolveConfigValue(config, env) {
  * stored `hypercharm` credential in ~/.pi/agent/auth.json wins, then
  * the HYPERCHARM_API_KEY environment variable.
  */
-function resolveApiKey() {
+export function resolveApiKey() {
   try {
     const auth = JSON.parse(fs.readFileSync(AUTH_JSON_PATH, 'utf8'));
     const credential = auth?.hypercharm;
@@ -193,6 +193,10 @@ ${tableRows}`;
   readme = readme.replace(tableRegex, newTable);
 
   readme = readme.replace(/\*\*\d+\+ AI Models\*\*/, `**${models.length}+ AI Models**`);
+  readme = readme.replace(
+    /\*\*\d+\+ models through \[Charm Hyper\]\(https:\/\/hyper\.charm\.land\/\)\*/,
+    `**${models.length}+ models through [Charm Hyper](https://hyper.charm.land/)**`,
+  );
 
   fs.writeFileSync(README_PATH, readme);
   console.log(`✓ Updated README.md with ${models.length} models`);
@@ -217,7 +221,7 @@ ${tableRows}`;
  * Must run BEFORE the new models.json is written; it reads the old file itself.
  * Returns the reconciled graveyard for the README merge.
  */
-function updateDeprecatedModels(modelsJsonPath, newModels) {
+export function updateDeprecatedModels(modelsJsonPath, newModels) {
   const deprecatedPath = path.join(path.dirname(modelsJsonPath), 'deprecated-models.json');
 
   let oldModels = [];
@@ -253,6 +257,8 @@ async function main() {
   try {
     const response = await fetch(MODELS_API_URL, {
       headers: { Authorization: `Bearer ${apiKey}` },
+      // Bound the request so a hung endpoint cannot stall the sync run.
+      signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -362,4 +368,8 @@ async function main() {
   }
 }
 
-main();
+// Run the CLI flow only when executed directly; importing the module (tests)
+// must stay side-effect free.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main();
+}

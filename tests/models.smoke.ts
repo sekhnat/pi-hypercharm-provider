@@ -233,7 +233,7 @@ assert.equal(DEPRECATED_MODEL_TTL_MS, 14 * 24 * 60 * 60 * 1000);
 		expired: depEntry("expired", 15),
 		broken: { id: "broken", deprecatedAt: "not-a-date" },
 		noid: { name: "no id" },
-	} as DeprecatedData;
+	} as unknown as DeprecatedData;
 
 	const active = activeDeprecatedModels(depData, NOW);
 	assert.deepEqual(active.map((m) => m.id), ["fresh", "boundary"], "only within-TTL entries with ids survive (TTL boundary inclusive)");
@@ -260,11 +260,11 @@ assert.equal(DEPRECATED_MODEL_TTL_MS, 14 * 24 * 60 * 60 * 1000);
 		ancient: depEntry("ancient", 20),
 		invalid: { id: "invalid", deprecatedAt: "nope" },
 		back: depEntry("back", 2),
-	} as DeprecatedData;
+	} as unknown as DeprecatedData;
 
 	const first = reconcileDeprecated(oldModels, newModels, graveyard, NOW);
 	assert.deepEqual(first.added, ["gone"], "delisted models enter the graveyard");
-	assert.match(first.deprecated.gone.deprecatedAt, /^\d{4}-\d{2}-\d{2}T/);
+	assert.match(first.deprecated.gone.deprecatedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
 	assert.deepEqual(first.resurrected, ["back"], "relisted models leave the graveyard");
 	assert.deepEqual([...first.evicted].sort(), ["ancient", "invalid"], "expired and undated entries are evicted");
 	assert.ok("recent" in first.deprecated, "recent graveyard entries survive untouched");

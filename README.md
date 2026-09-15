@@ -2,7 +2,7 @@
 
 # ✨ pi-hypercharm-provider
 
-**17+ models through [Charm Hyper](https://hyper.charm.land/)**
+**34+ models through [Charm Hyper](https://hyper.charm.land/)**
 
 _Hyperoptimized coding models — DeepSeek, GLM, Kimi, Qwen, MiniMax, Gemma, GPT-OSS, and Llama for [pi](https://github.com/earendil-works/pi-coding-agent)._
 

@@ -7,8 +7,8 @@
  * Model metadata comes from Charm's typed official-catalog endpoint,
  * /v1/provider, matching @charmland/pi-hyper-provider. It provides canonical
  * names, pricing, context and output limits, reasoning levels, and attachment
- * support. patch.json remains available for verified endpoint regressions, but
- * currently contains no overrides.
+ * support. patch.json remains available for verified endpoint regressions; it
+ * currently restores Pi's max thinking level on the DeepSeek V4 models.
  *
  * Model resolution strategy: Stale-While-Revalidate
  *   1. Serve stale immediately: disk cache → embedded models.json (zero-latency)
@@ -98,6 +98,7 @@
 
 import { clampThinkingLevel, streamOpenAICompletions } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { USER_AGENT, loginHypercharm, refreshHypercharmToken } from "./oauth";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import modelsData from "./models.json" with { type: "json" };
@@ -284,12 +285,21 @@ function settleTeeReaders(): Promise<void> {
 }
 
 function captureRateLimitHeaders(headers: Headers): void {
-	const limitHour = Number(headers.get("x-ratelimit-limit-hour"));
-	const limitDay = Number(headers.get("x-ratelimit-limit-day"));
-	const remainingHour = Number(headers.get("x-ratelimit-remaining-hour"));
-	const remainingDay = Number(headers.get("x-ratelimit-remaining-day"));
-	if (![limitHour, limitDay, remainingHour, remainingDay].every((v) => Number.isFinite(v))) return;
-	account.rate = { limitHour, limitDay, remainingHour, remainingDay, capturedAt: Date.now() };
+	const limitHour = headers.get("x-ratelimit-limit-hour");
+	const limitDay = headers.get("x-ratelimit-limit-day");
+	const remainingHour = headers.get("x-ratelimit-remaining-hour");
+	const remainingDay = headers.get("x-ratelimit-remaining-day");
+	// Absent headers must not become a zeroed rate window (Number(null) === 0).
+	if (limitHour === null || limitDay === null || remainingHour === null || remainingDay === null) return;
+	const rate = {
+		limitHour: Number(limitHour),
+		limitDay: Number(limitDay),
+		remainingHour: Number(remainingHour),
+		remainingDay: Number(remainingDay),
+		capturedAt: Date.now(),
+	};
+	if (![rate.limitHour, rate.limitDay, rate.remainingHour, rate.remainingDay].every((v) => Number.isFinite(v))) return;
+	account.rate = rate;
 }
 
 /** Extract spend data from a parsed completion chunk/body's usage object. */
@@ -420,7 +430,9 @@ let lastCreditsFetchAt = 0;
 let creditsInFlight: Promise<void> | null = null;
 let metaFetched = false;
 
-async function fetchJsonGet(url: string, apiKey: string, signal?: AbortSignal): Promise<any | null> {
+type FetchJsonResult = { ok: true; value: any } | { ok: false };
+
+async function fetchJsonGet(url: string, apiKey: string, signal?: AbortSignal): Promise<FetchJsonResult> {
 	try {
 		const response = await fetch(url, {
 			headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": USER_AGENT },
@@ -428,10 +440,10 @@ async function fetchJsonGet(url: string, apiKey: string, signal?: AbortSignal): 
 				? AbortSignal.any([AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS), signal])
 				: AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS),
 		});
-		if (!response.ok) return null;
-		return await response.json();
+		if (!response.ok) return { ok: false };
+		return { ok: true, value: await response.json() };
 	} catch {
-		return null;
+		return { ok: false };
 	}
 }
 
@@ -443,8 +455,9 @@ function refreshCredits(apiKey: string | undefined, signal: AbortSignal | undefi
 	if (creditsInFlight) return creditsInFlight;
 	creditsInFlight = (async () => {
 		try {
-			const data = await fetchJsonGet(`${BASE_URL}/credits`, apiKey, signal);
-			if (data === null) return;
+			const result = await fetchJsonGet(`${BASE_URL}/credits`, apiKey, signal);
+			if (!result.ok) return;
+			const data = result.value;
 			// /credits can report hypercredits ("balance") or USD ("balance_usd",
 			// USD-billed accounts). Handle both at the observed 20 hc = $1 rate so a
 			// server-side unit switch can never silently freeze the balance readout.
@@ -460,6 +473,7 @@ function refreshCredits(apiKey: string | undefined, signal: AbortSignal | undefi
 }
 
 /** Team name (/v1/teams) + OAuth device-session expiry (/v1/devices). */
+/** Team name (/v1/teams) + OAuth device-session expiry (/v1/devices). */
 async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSignal): Promise<void> {
 	if (!apiKey || metaFetched) return;
 	const [teams, devices] = await Promise.all([
@@ -468,7 +482,7 @@ async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSign
 	]);
 	if (signal?.aborted) return;
 
-	const teamName = teams?.items?.[0]?.name;
+	const teamName = teams.ok ? teams.value?.items?.[0]?.name : undefined;
 	if (typeof teamName === "string" && teamName.trim()) {
 		account.teamName = teamName.trim();
 	}
@@ -476,15 +490,20 @@ async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSign
 	// Devices: the OAuth device flow registers this machine as
 	// `Pi (<hostname>)`. Match by name; skip silently for API-key auth
 	// (the endpoint returns OAuth sessions and may be empty).
-	if (Array.isArray(devices?.items)) {
-		const own = devices.items.find((d: any) => typeof d?.name === "string" && d.name === `Pi (${hostname()})`);
-		const expMs = own ? Date.parse(own.expires_at ?? "") : NaN;
+	if (devices.ok && Array.isArray(devices.value?.items)) {
+		const own = (devices.value.items as Array<{ name?: unknown; expires_at?: unknown }>).find(
+			(d) => typeof d?.name === "string" && d.name === `Pi (${hostname()})`,
+		);
+		const expMs = own ? Date.parse(String(own.expires_at ?? "")) : NaN;
 		if (!Number.isNaN(expMs)) {
 			account.authDaysLeft = Math.max(0, Math.ceil((expMs - Date.now()) / 86_400_000));
 		}
 	}
 
-	if (account.teamName !== null || account.authDaysLeft !== null) metaFetched = true;
+	// One completed sweep stops the per-turn retries even when the account
+	// exposes no atoms (API-key auth has no /v1/devices entries). Failed
+	// fetches keep retrying on the next activity.
+	metaFetched = teams.ok && devices.ok;
 }
 
 // ─── Status Rendering ─────────────────────────────────────────────────────────
@@ -704,7 +723,7 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 	}
 
 	const [rawKey, rawValue] = tokens;
-	const key = rawKey.toLowerCase();
+	const key = (rawKey ?? "").toLowerCase();
 	const value = rawValue?.toLowerCase();
 
 	if (key === "refresh") {
@@ -865,9 +884,9 @@ function makeProviderConfig(models: JsonModel[] = currentModels) {
 		streamSimple: streamHypercharm,
 		oauth: {
 			name: "HyperCharm",
-			login: (callbacks) => loginHypercharm(callbacks),
-			refreshToken: (credentials, signal) => refreshHypercharmToken(credentials, signal),
-			getApiKey: (credentials) => String(credentials.access ?? ""),
+			login: (callbacks: OAuthLoginCallbacks) => loginHypercharm(callbacks),
+			refreshToken: (credentials: OAuthCredentials, signal?: AbortSignal) => refreshHypercharmToken(credentials, signal),
+			getApiKey: (credentials: OAuthCredentials) => String(credentials.access ?? ""),
 		},
 	};
 }

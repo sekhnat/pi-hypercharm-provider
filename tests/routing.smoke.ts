@@ -27,6 +27,8 @@ interface Harness {
 	statuses: Map<string, string | undefined>;
 	widget: { value: unknown };
 	eventHandlers: Map<string, Set<Handler>>;
+	boot(): Promise<void>;
+	discover(capabilities?: string[]): void;
 	runCommand(args: string): Promise<void>;
 	selectModel(provider: string): Promise<void>;
 	runTurn(): Promise<void>;
@@ -196,7 +198,6 @@ function makeHarness(provider = "hypercharm"): Harness {
 			for (const handler of eventHandlers.get("agent_settled") ?? []) await handler({}, ctx);
 		},
 	};
-	return harness;
 }
 cleanupAgentDirs();
 
