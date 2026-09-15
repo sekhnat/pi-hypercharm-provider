@@ -105,6 +105,14 @@ import customModelsData from "./custom-models.json" with { type: "json" };
 import patchData from "./patch.json" with { type: "json" };
 import deprecatedData from "./deprecated-models.json" with { type: "json" };
 import {
+	buildModels,
+	mergeWithEmbedded,
+	transformApiModel,
+	type DeprecatedData,
+	type JsonModel,
+	type PatchData,
+} from "./model-catalog";
+import {
 	applyOptimisticSpend,
 	buildAccountTiers,
 	buildSessionLine,
@@ -125,122 +133,6 @@ import fs from "fs";
 import { hostname } from "os";
 import path from "path";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface JsonModel {
-	id: string;
-	name: string;
-	reasoning: boolean;
-	input: ("text" | "image")[];
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-	};
-	contextWindow: number;
-	maxTokens: number;
-	thinkingLevelMap?: Record<string, string | null>;
-	compat?: {
-		supportsDeveloperRole?: boolean;
-		supportsStore?: boolean;
-		maxTokensField?: "max_completion_tokens" | "max_tokens";
-		thinkingFormat?: "openai" | "zai" | "qwen" | "qwen-chat-template" | "deepseek";
-		supportsReasoningEffort?: boolean;
-		requiresReasoningContentOnAssistantMessages?: boolean;
-	};
-}
-
-interface PatchEntry {
-	name?: string;
-	reasoning?: boolean;
-	input?: ("text" | "image")[];
-	cost?: {
-		input?: number;
-		output?: number;
-		cacheRead?: number;
-		cacheWrite?: number;
-	};
-	contextWindow?: number;
-	maxTokens?: number;
-	thinkingLevelMap?: Record<string, string | null>;
-	compat?: Record<string, unknown>;
-}
-
-type PatchData = Record<string, PatchEntry>;
-
-// ─── Patch Application ────────────────────────────────────────────────────────
-
-function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
-	const result = { ...model };
-
-	if (patch.name !== undefined) result.name = patch.name;
-	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
-	if (patch.input !== undefined) result.input = patch.input;
-	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
-	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
-	if (patch.thinkingLevelMap !== undefined) result.thinkingLevelMap = { ...patch.thinkingLevelMap };
-
-	if (patch.cost) {
-		result.cost = {
-			input: patch.cost.input ?? result.cost.input,
-			output: patch.cost.output ?? result.cost.output,
-			cacheRead: patch.cost.cacheRead ?? result.cost.cacheRead,
-			cacheWrite: patch.cost.cacheWrite ?? result.cost.cacheWrite,
-		};
-	}
-	if (patch.compat) {
-		result.compat = { ...(result.compat || {}), ...patch.compat };
-	}
-
-	if (!result.reasoning && result.compat?.thinkingFormat) {
-		delete result.compat.thinkingFormat;
-	}
-	if (!result.reasoning && result.thinkingLevelMap) {
-		delete result.thinkingLevelMap;
-	}
-	if (result.compat && Object.keys(result.compat).length === 0) {
-		delete result.compat;
-	}
-
-	return result;
-}
-
-/** Full pipeline: base models → patch → custom → result */
-function buildModels(base: JsonModel[], custom: JsonModel[], patch: PatchData): JsonModel[] {
-	const modelMap = new Map<string, JsonModel>();
-
-	// Seed with the base list plus grace-period deprecated models so patch.json
-	// entries apply to deprecated models exactly as while the model was live
-	// (withDeprecated keeps live data on id conflicts).
-	for (const model of withDeprecated(base)) {
-		modelMap.set(model.id, model);
-	}
-
-	for (const [id, patchEntry] of Object.entries(patch)) {
-		const existing = modelMap.get(id);
-		if (existing) {
-			modelMap.set(id, applyPatch(existing, patchEntry));
-		}
-	}
-
-	for (const model of custom) {
-		const existing = modelMap.get(model.id);
-		const patchEntry = patch[model.id];
-		if (existing && patchEntry) {
-			modelMap.set(model.id, applyPatch(model, patchEntry));
-		} else if (existing) {
-			modelMap.set(model.id, model);
-		} else if (patchEntry) {
-			modelMap.set(model.id, applyPatch(model, patchEntry));
-		} else {
-			modelMap.set(model.id, model);
-		}
-	}
-
-	return Array.from(modelMap.values());
-}
-
 // ─── Stale-While-Revalidate Model Sync ────────────────────────────────────────
 
 const PROVIDER_ID = "hypercharm";
@@ -249,67 +141,6 @@ const MODELS_URL = `${BASE_URL}/provider`;
 const CACHE_DIR = path.join(getAgentDir(), "cache");
 const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
-
-const PI_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-const ON_OFF_THINKING_LEVEL_MAP: Record<string, string | null> = {
-	off: "off",
-	minimal: null,
-	low: null,
-	medium: null,
-	high: null,
-	xhigh: null,
-	max: "max",
-};
-
-function buildThinkingLevelMap(levels: string[]): Record<string, string | null> | undefined {
-	if (levels.length === 0) return undefined;
-	const available = new Set(levels);
-	const result: Record<string, string | null> = {
-		off: available.has("off") ? "off" : available.has("none") ? "none" : null,
-	};
-	for (const level of PI_THINKING_LEVELS) {
-		result[level] = available.has(level) ? level : null;
-	}
-	return result;
-}
-
-/** Transform a model from Charm's official typed Hyper /v1/provider catalog. */
-function transformApiModel(apiModel: any): JsonModel | null {
-	if (typeof apiModel.id !== "string" || apiModel.id.length === 0) return null;
-
-	const reasoningLevels = Array.isArray(apiModel.reasoning_levels)
-		? apiModel.reasoning_levels.filter((level: any) => typeof level === "string")
-		: [];
-	const supportsReasoningEffort = reasoningLevels.length > 0;
-	const thinkingLevelMap = supportsReasoningEffort
-		? buildThinkingLevelMap(reasoningLevels)
-		: apiModel.can_reason === true
-			? ON_OFF_THINKING_LEVEL_MAP
-			: undefined;
-
-	return {
-		id: apiModel.id,
-		name: apiModel.name || apiModel.id,
-		reasoning: apiModel.can_reason === true,
-		thinkingLevelMap,
-		input: apiModel.supports_attachments === true ? ["text", "image"] : ["text"],
-		cost: {
-			input: apiModel.cost_per_1m_in || 0,
-			output: apiModel.cost_per_1m_out || 0,
-			cacheRead: apiModel.cost_per_1m_out_cached || 0,
-			cacheWrite: apiModel.cost_per_1m_in_cached || 0,
-		},
-		contextWindow: apiModel.context_window || 0,
-		maxTokens: apiModel.default_max_tokens || apiModel.context_window || 0,
-		compat: {
-			supportsStore: false,
-			supportsReasoningEffort,
-			thinkingFormat: "deepseek",
-			maxTokensField: "max_tokens",
-		},
-	};
-}
 
 async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<JsonModel[] | null> {
 	try {
@@ -343,65 +174,6 @@ function cacheModels(models: JsonModel[]): void {
 	} catch {
 		// Cache write failure is non-fatal
 	}
-}
-
-function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonModel[]): JsonModel[] {
-	const embeddedMap = new Map(embeddedModels.map(m => [m.id, m]));
-	const seen = new Set<string>();
-	const result: JsonModel[] = [];
-	for (const liveModel of liveModels) {
-		const embedded = embeddedMap.get(liveModel.id);
-		seen.add(liveModel.id);
-		if (embedded) {
-			// The official /v1/provider catalog is authoritative for pricing, including
-			// legitimately zero-priced preview models. Curation (reasoning/input/compat/name)
-			// still wins via ...embedded.
-			result.push({
-				...liveModel,
-				...embedded,
-				cost: liveModel.cost,
-				contextWindow: liveModel.contextWindow || embedded.contextWindow,
-			});
-		} else {
-			result.push(liveModel);
-		}
-	}
-	// Append any embedded models that the live API didn't return
-	for (const em of embeddedModels) {
-		if (!seen.has(em.id)) {
-			result.push(em);
-		}
-	}
-	return result;
-}
-
-// Grace period for delisted models. When the provider API stops listing a
-// model, update-models.js moves its last-known definition into
-// deprecated-models.json (stamped with deprecatedAt) instead of dropping it.
-// For 14 days the model keeps working here so in-flight sessions and saved
-// model settings do not break; afterwards it is evicted permanently.
-const DEPRECATED_MODEL_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-
-// Grace-period deprecated models with deprecation metadata stripped.
-function activeDeprecatedModels(): JsonModel[] {
-	const now = Date.now();
-	const result: JsonModel[] = [];
-	for (const entry of Object.values(deprecatedData as Record<string, JsonModel & { deprecatedAt?: string }>)) {
-		if (!entry?.id) continue;
-		const removedAt = Date.parse(entry.deprecatedAt ?? "");
-		if (Number.isNaN(removedAt) || now - removedAt > DEPRECATED_MODEL_TTL_MS) continue;
-		const model = { ...entry } as JsonModel & { deprecatedAt?: string };
-		delete model.deprecatedAt;
-		result.push(model);
-	}
-	return result;
-}
-
-// Append grace-period deprecated models the list does not already have (live data wins).
-function withDeprecated(models: JsonModel[]): JsonModel[] {
-	const seen = new Set(models.map((m) => m.id));
-	const extras = activeDeprecatedModels().filter((m) => !seen.has(m.id));
-	return extras.length > 0 ? [...models, ...extras] : models;
 }
 
 function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
@@ -1099,9 +871,10 @@ export default function (pi: ExtensionAPI) {
 	const embeddedModels = modelsData as JsonModel[];
 	const customModels = customModelsData as JsonModel[];
 	const patches = patchData as PatchData;
+	const deprecated = deprecatedData as DeprecatedData;
 
 	const staleBase = loadStaleModels(embeddedModels);
-	const staleModels = buildModels(staleBase, customModels, patches);
+	const staleModels = buildModels(staleBase, customModels, patches, deprecated);
 	currentModels = staleModels;
 
 	// Subscribe to sidebar discovery at factory time: Pi completes extension
@@ -1147,7 +920,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			revalidateModels(cachedApiKey, embeddedModels, signal).then((freshBase) => {
 				if (freshBase && epoch === statusEpoch && !signal.aborted) {
-					currentModels = buildModels(freshBase, customModels, patches);
+					currentModels = buildModels(freshBase, customModels, patches, deprecated);
 					pi.registerProvider(PROVIDER_ID, makeProviderConfig());
 				}
 			});

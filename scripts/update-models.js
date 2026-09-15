@@ -16,6 +16,9 @@
  *
  * Merge order for README: models.json → apply patch.json → merge custom-models.json
  *
+ * The transform/merge/deprecation helpers are shared with the runtime via
+ * ../model-catalog.ts — edit that module, not local copies.
+ *
  * API key: the stored `hypercharm` credential in ~/.pi/agent/auth.json wins, then
  * the HYPERCHARM_API_KEY environment variable. The script refuses to run without one.
  */
@@ -25,6 +28,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { buildModels, reconcileDeprecated, transformApiModel } from '../model-catalog.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -149,130 +153,6 @@ function saveJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
-function convertPricing(v) {
-  if (!v) return 0;
-  const n = typeof v === 'string' ? parseFloat(v) : v;
-  // API returns $/M directly; round to 6 decimals to preserve sub-cent cache prices.
-  return Math.round(n * 1e6) / 1e6;
-}
-
-// ─── Patch application ────────────────────────────────────────────────────────
-
-function applyPatch(model, patch) {
-  const result = { ...model };
-  if (patch.name !== undefined) result.name = patch.name;
-  if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
-  if (patch.input !== undefined) result.input = patch.input;
-  if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
-  if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
-  if (patch.thinkingLevelMap !== undefined) result.thinkingLevelMap = { ...patch.thinkingLevelMap };
-  if (patch.cost) {
-    result.cost = {
-      input: patch.cost.input ?? result.cost.input,
-      output: patch.cost.output ?? result.cost.output,
-      cacheRead: patch.cost.cacheRead ?? result.cost.cacheRead,
-      cacheWrite: patch.cost.cacheWrite ?? result.cost.cacheWrite,
-    };
-  }
-  if (patch.compat) {
-    result.compat = { ...(result.compat || {}), ...patch.compat };
-  }
-  if (!result.reasoning && result.compat?.thinkingFormat) {
-    delete result.compat.thinkingFormat;
-  }
-  if (!result.reasoning && result.thinkingLevelMap) {
-    delete result.thinkingLevelMap;
-  }
-  if (result.compat && Object.keys(result.compat).length === 0) {
-    delete result.compat;
-  }
-  return result;
-}
-
-function buildModels(baseModels, customModels, patchData) {
-  const modelMap = new Map();
-  for (const model of baseModels) modelMap.set(model.id, model);
-  for (const [id, patchEntry] of Object.entries(patchData)) {
-    const existing = modelMap.get(id);
-    if (existing) modelMap.set(id, applyPatch(existing, patchEntry));
-  }
-  for (const model of customModels) {
-    const existing = modelMap.get(model.id);
-    const patchEntry = patchData[model.id];
-    if (existing && patchEntry) modelMap.set(model.id, applyPatch(model, patchEntry));
-    else if (existing) modelMap.set(model.id, model);
-    else if (patchEntry) modelMap.set(model.id, applyPatch(model, patchEntry));
-    else modelMap.set(model.id, model);
-  }
-  return Array.from(modelMap.values());
-}
-
-// ─── Model transformation ─────────────────────────────────────────────────────
-
-const PI_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-
-// Charm's official extension treats a reasoning-capable model with no levels as
-// a boolean on/off model: Pi's max level selects the single on state.
-const ON_OFF_THINKING_LEVEL_MAP = {
-  off: 'off',
-  minimal: null,
-  low: null,
-  medium: null,
-  high: null,
-  xhigh: null,
-  max: 'max',
-};
-
-function buildThinkingLevelMap(levels) {
-  if (levels.length === 0) return undefined;
-  const available = new Set(levels);
-  const result = {
-    // The provider enum uses "none" for the off state on newer deployments;
-    // the official extension looked only for the older "off" spelling.
-    off: available.has('off') ? 'off' : available.has('none') ? 'none' : null,
-  };
-  for (const level of PI_THINKING_LEVELS) {
-    result[level] = available.has(level) ? level : null;
-  }
-  return result;
-}
-
-function transformModel(apiModel) {
-  const reasoningLevels = Array.isArray(apiModel.reasoning_levels)
-    ? apiModel.reasoning_levels.filter(level => typeof level === 'string')
-    : [];
-  const supportsReasoningEffort = reasoningLevels.length > 0;
-  const thinkingLevelMap = supportsReasoningEffort
-    ? buildThinkingLevelMap(reasoningLevels)
-    : apiModel.can_reason === true
-      ? ON_OFF_THINKING_LEVEL_MAP
-      : undefined;
-
-  return {
-    id: apiModel.id,
-    name: apiModel.name,
-    reasoning: apiModel.can_reason === true,
-    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-    input: apiModel.supports_attachments === true ? ['text', 'image'] : ['text'],
-    cost: {
-      input: typeof apiModel.cost_per_1m_in === 'number' ? apiModel.cost_per_1m_in : 0,
-      output: typeof apiModel.cost_per_1m_out === 'number' ? apiModel.cost_per_1m_out : 0,
-      // Matches Charm's official extension: cacheRead is the discounted cached-output
-      // price, cacheWrite the cached-input price.
-      cacheRead: typeof apiModel.cost_per_1m_out_cached === 'number' ? apiModel.cost_per_1m_out_cached : 0,
-      cacheWrite: typeof apiModel.cost_per_1m_in_cached === 'number' ? apiModel.cost_per_1m_in_cached : 0,
-    },
-    contextWindow: apiModel.context_window || 0,
-    maxTokens: apiModel.default_max_tokens || apiModel.context_window || 0,
-    compat: {
-      supportsStore: false,
-      supportsReasoningEffort,
-      thinkingFormat: 'deepseek',
-      maxTokensField: 'max_tokens',
-    },
-  };
-}
-
 // ─── README generation ────────────────────────────────────────────────────────
 
 function formatCost(cost) {
@@ -320,12 +200,6 @@ ${tableRows}`;
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-// Grace period for delisted models: update-models.js moves models the API no
-// longer lists into deprecated-models.json (stamped with deprecatedAt) instead
-// of dropping them; the runtime appends them back so sessions and saved model
-// settings keep working, and after 14 days they are evicted permanently.
-const DEPRECATED_MODEL_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-
 /**
  * Reconcile deprecated-models.json against the freshly fetched model list.
  * - in old models.json but not the API: moved into the deprecated file
@@ -333,6 +207,15 @@ const DEPRECATED_MODEL_TTL_MS = 14 * 24 * 60 * 60 * 1000;
  * - back in the API: resurrected (dropped from the deprecated file)
  * - deprecatedAt older than 14 days: evicted permanently
  * Must run BEFORE the new models.json is written; it reads the old file itself.
+ */
+/**
+ * Reconcile deprecated-models.json against the freshly fetched model list.
+ * - in old models.json but not the API: moved into the deprecated file
+ *   (deprecatedAt = now; preserved on repeat runs so the grace clock is not reset)
+ * - back in the API: resurrected (dropped from the deprecated file)
+ * - deprecatedAt older than 14 days: evicted permanently
+ * Must run BEFORE the new models.json is written; it reads the old file itself.
+ * Returns the reconciled graveyard for the README merge.
  */
 function updateDeprecatedModels(modelsJsonPath, newModels) {
   const deprecatedPath = path.join(path.dirname(modelsJsonPath), 'deprecated-models.json');
@@ -349,62 +232,13 @@ function updateDeprecatedModels(modelsJsonPath, newModels) {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) deprecated = parsed;
   } catch { /* no graveyard yet */ }
 
-  const currentIds = new Set(newModels.map(m => m.id));
-  const now = new Date().toISOString();
-  const added = [];
-  const resurrected = [];
-  const evicted = [];
-
-  for (const old of oldModels) {
-    if (old && old.id && !currentIds.has(old.id) && !deprecated[old.id]) {
-      deprecated[old.id] = { ...old, deprecatedAt: now };
-      added.push(old.id);
-    }
-  }
-
-  for (const [id, entry] of Object.entries(deprecated)) {
-    if (currentIds.has(id)) {
-      delete deprecated[id];
-      resurrected.push(id);
-      continue;
-    }
-    const removedAt = Date.parse(entry && entry.deprecatedAt ? entry.deprecatedAt : '');
-    if (Number.isNaN(removedAt) || Date.now() - removedAt > DEPRECATED_MODEL_TTL_MS) {
-      delete deprecated[id];
-      evicted.push(id);
-    }
-  }
+  const { deprecated: reconciled, added, resurrected, evicted } = reconcileDeprecated(oldModels, newModels, deprecated, Date.now());
 
   if (added.length > 0 || resurrected.length > 0 || evicted.length > 0) {
-    fs.writeFileSync(deprecatedPath, JSON.stringify(deprecated, null, 2) + '\n');
+    fs.writeFileSync(deprecatedPath, JSON.stringify(reconciled, null, 2) + '\n');
     console.log('Updated deprecated-models.json ' + JSON.stringify({ added, resurrected, evicted }));
   }
-}
-
-/**
- * Grace-period deprecated models (deprecatedAt within TTL) with metadata stripped.
- * Keeps the README table serving models that are delisted but still within their
- * 14-day grace window.
- */
-function withDeprecatedForReadme(models) {
-  const deprecatedPath = path.join(process.cwd(), 'deprecated-models.json');
-  let deprecated = {};
-  try {
-    const parsed = JSON.parse(fs.readFileSync(deprecatedPath, 'utf8'));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) deprecated = parsed;
-  } catch { /* no graveyard yet */ }
-  const now = Date.now();
-  const seen = new Set(models.map(m => m.id));
-  const extras = [];
-  for (const entry of Object.values(deprecated)) {
-    if (!entry || !entry.id || seen.has(entry.id)) continue;
-    const removedAt = Date.parse(entry.deprecatedAt || '');
-    if (Number.isNaN(removedAt) || now - removedAt > DEPRECATED_MODEL_TTL_MS) continue;
-    const m = { ...entry };
-    delete m.deprecatedAt;
-    extras.push(m);
-  }
-  return extras.length > 0 ? [...models, ...extras] : models;
+  return reconciled;
 }
 async function main() {
   const apiKey = resolveApiKey();
@@ -448,7 +282,7 @@ async function main() {
     }
 
     // Transform models from API, preserving existing curated data
-    let apiTransformed = apiModels.map(m => transformModel(m));
+    let apiTransformed = apiModels.map(transformApiModel).filter((m) => m !== null);
     apiTransformed.sort((a, b) => a.name.localeCompare(b.name));
 
     // Load patch overrides for README rendering. Canonical metadata already
@@ -457,7 +291,7 @@ async function main() {
 
     // Update models.json — curated API data
     // Move delisted models to deprecated-models.json BEFORE models.json is overwritten
-    updateDeprecatedModels(MODELS_JSON_PATH, apiTransformed);
+    const graveyard = updateDeprecatedModels(MODELS_JSON_PATH, apiTransformed);
     fs.writeFileSync(MODELS_JSON_PATH, JSON.stringify(apiTransformed, null, 2) + '\n');
     console.log(`✓ Updated models.json (${apiTransformed.length} models)`);
 
@@ -482,7 +316,7 @@ async function main() {
     }
 
     // Build merged models with patches for README
-    const readmeModels = buildModels(withDeprecatedForReadme(apiTransformed), customModels, patch);
+    const readmeModels = buildModels(apiTransformed, customModels, patch, graveyard);
     readmeModels.sort((a, b) => a.name.localeCompare(b.name));
 
     // Update README
