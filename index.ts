@@ -104,12 +104,17 @@ import modelsData from "./models.json" with { type: "json" };
 import customModelsData from "./custom-models.json" with { type: "json" };
 import patchData from "./patch.json" with { type: "json" };
 import deprecatedData from "./deprecated-models.json" with { type: "json" };
+import pkg from "./package.json" with { type: "json" };
 import {
 	buildModels,
+	embeddedCatalogHash,
+	mergeStaleModels,
 	mergeWithEmbedded,
+	parseModelsCache,
 	transformApiModel,
 	type DeprecatedData,
 	type JsonModel,
+	type ModelsCache,
 	type PatchData,
 } from "./model-catalog";
 import {
@@ -141,6 +146,8 @@ const MODELS_URL = `${BASE_URL}/provider`;
 const CACHE_DIR = path.join(getAgentDir(), "cache");
 const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
+const EMBEDDED_HASH = embeddedCatalogHash(modelsData as JsonModel[]);
+const VERSION = (pkg as { version?: string }).version ?? "0.0.0";
 
 async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<JsonModel[] | null> {
 	try {
@@ -158,10 +165,9 @@ async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<Js
 	}
 }
 
-function loadCachedModels(): JsonModel[] | null {
+function loadCachedModels(): ModelsCache | null {
 	try {
-		const data = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
-		return Array.isArray(data) ? data : null;
+		return parseModelsCache(JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")));
 	} catch {
 		return null;
 	}
@@ -170,26 +176,25 @@ function loadCachedModels(): JsonModel[] | null {
 function cacheModels(models: JsonModel[]): void {
 	try {
 		fs.mkdirSync(CACHE_DIR, { recursive: true });
-		fs.writeFileSync(CACHE_PATH, JSON.stringify(models, null, 2) + "\n");
+		const envelope = { version: VERSION, embeddedHash: EMBEDDED_HASH, models };
+		fs.writeFileSync(CACHE_PATH, JSON.stringify(envelope, null, 2) + "\n");
 	} catch {
 		// Cache write failure is non-fatal
 	}
 }
 
-function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
+function loadStaleModels(embeddedModels: JsonModel[], graveyard: DeprecatedData): JsonModel[] {
 	const cached = loadCachedModels();
-	if (!cached || cached.length === 0) return embeddedModels;
+	if (!cached || cached.models.length === 0) return embeddedModels;
 
-	// Merge embedded models that are missing from cache (newly added models)
-	const cachedMap = new Map(cached.map(m => [m.id, m]));
-	for (const em of embeddedModels) {
-		if (!cachedMap.has(em.id)) {
-			cached.push(em);
-		}
-	}
-	return cached;
+	// Cache written against different embedded content (older/newer release, or
+	// a legacy bare-array cache): this release's curated catalog wins for shared
+	// ids and the cache contributes only its extra ids, so fixes shipped in a
+	// release are never masked by stale on-disk data. Graveyard ids never come
+	// from the cache — the grace layer owns a delisted model's lifetime.
+	const preferEmbedded = cached.embeddedHash !== EMBEDDED_HASH;
+	return mergeStaleModels(cached.models, embeddedModels, preferEmbedded, graveyard);
 }
-
 async function revalidateModels(apiKey: string | undefined, embeddedModels: JsonModel[], signal?: AbortSignal): Promise<JsonModel[] | null> {
 	if (!apiKey) return null;
 	const liveModels = await fetchLiveModels(apiKey, signal);
@@ -873,7 +878,7 @@ export default function (pi: ExtensionAPI) {
 	const patches = patchData as PatchData;
 	const deprecated = deprecatedData as DeprecatedData;
 
-	const staleBase = loadStaleModels(embeddedModels);
+	const staleBase = loadStaleModels(embeddedModels, deprecated);
 	const staleModels = buildModels(staleBase, customModels, patches, deprecated);
 	currentModels = staleModels;
 

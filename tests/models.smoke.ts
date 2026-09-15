@@ -12,7 +12,10 @@ import {
 	applyPatch,
 	buildModels,
 	buildThinkingLevelMap,
+	embeddedCatalogHash,
+	mergeStaleModels,
 	mergeWithEmbedded,
+	parseModelsCache,
 	reconcileDeprecated,
 	transformApiModel,
 	withDeprecated,
@@ -274,6 +277,75 @@ assert.equal(DEPRECATED_MODEL_TTL_MS, 14 * 24 * 60 * 60 * 1000);
 	assert.equal(second.deprecated.gone.deprecatedAt, first.deprecated.gone.deprecatedAt);
 	assert.deepEqual(second.resurrected, []);
 	assert.deepEqual(second.evicted, []);
+}
+
+// ── mergeStaleModels ──
+{
+	const cached = [
+		model("a", { name: "Cache A", cost: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0 } }),
+		model("old", { name: "Old" }),
+	];
+	const embedded = [model("a", { name: "Embedded A", contextWindow: 1234 }), model("new", { name: "Embedded New" })];
+	const grave = { gone: depEntry("gone", 1) };
+
+	// Hash match: the cache keeps precedence (it may hold live-merged data newer
+	// than the release snapshot, e.g. post-release pricing updates), embedded
+	// fills gaps.
+	const cacheWins = mergeStaleModels(cached, embedded, false, {});
+	assert.deepEqual(
+		cacheWins.map((m) => m.id),
+		["a", "old", "new"],
+	);
+	assert.equal(cacheWins[0]!.name, "Cache A", "cache entry keeps precedence on hash match");
+	assert.equal(cacheWins[0]!.cost.input, 9);
+
+	// Hash mismatch (older/newer release, or legacy cache): this release's
+	// curated catalog wins shared ids; the cache contributes only missing ids.
+	const embeddedWins = mergeStaleModels(cached, embedded, true, {});
+	assert.deepEqual(
+		embeddedWins.map((m) => m.id),
+		["a", "new", "old"],
+	);
+	assert.equal(embeddedWins[0]!.name, "Embedded A", "embedded curation replaces stale cache data");
+	assert.equal(embeddedWins[0]!.cost.input, 0);
+
+	// Graveyard-owned ids never come from the cache — the grace layer is the
+	// single owner of a delisted model's lifetime (both directions).
+	const cachedWithGrave = [model("a", { name: "Cache A" }), model("gone", { name: "Cached Gone" })];
+	assert.ok(
+		!mergeStaleModels(cachedWithGrave, embedded, false, grave).some((m) => m.id === "gone"),
+		"graveyard id dropped from the cache on the hash-match path",
+	);
+	const mismatch = mergeStaleModels(cachedWithGrave, embedded, true, grave);
+	assert.ok(!mismatch.some((m) => m.id === "gone"), "graveyard id dropped from cache extras on mismatch");
+	const built = buildModels(mismatch, [], {}, grave, NOW);
+	assert.ok(built.some((m) => m.id === "gone"), "within-TTL graveyard model re-added by the grace layer");
+}
+
+// ── parseModelsCache ──
+assert.equal(parseModelsCache(null), null);
+assert.equal(parseModelsCache("nope"), null);
+assert.equal(parseModelsCache(42), null);
+assert.equal(parseModelsCache({}), null);
+assert.equal(parseModelsCache({ models: "x" }), null);
+{
+	const envelope = parseModelsCache({ version: "1.2.3", embeddedHash: "ab12", models: [model("a")] })!;
+	assert.equal(envelope.version, "1.2.3");
+	assert.equal(envelope.embeddedHash, "ab12");
+	assert.equal(envelope.models.length, 1);
+	const legacy = parseModelsCache([model("a"), model("b")])!;
+	assert.equal(legacy.embeddedHash, "", "legacy bare-array cache → unknown hash (embedded wins shared ids)");
+	assert.equal(legacy.models.length, 2);
+}
+
+// ── embeddedCatalogHash ──
+{
+	const h1 = embeddedCatalogHash([model("a")]);
+	const h2 = embeddedCatalogHash([model("a")]);
+	const h3 = embeddedCatalogHash([model("a", { name: "Changed" })]);
+	assert.equal(h1, h2, "deterministic across runs");
+	assert.notEqual(h1, h3, "any embedded content change invalidates the hash");
+	assert.match(h1, /^[0-9a-f]{64}$/, "sha256 hex digest");
 }
 
 console.log("models.smoke: all assertions passed");

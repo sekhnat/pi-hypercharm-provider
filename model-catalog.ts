@@ -12,6 +12,8 @@
  * testable; call sites default to Date.now().
  */
 
+import { createHash } from "node:crypto";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface JsonModel {
@@ -250,6 +252,71 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
 		}
 	}
 	return result;
+}
+
+// ─── Model cache (stale-while-revalidate) ─────────────────────────────────────
+
+/** Version-stamped runtime cache envelope written by cacheModels (index.ts). */
+export interface ModelsCache {
+	/** Extension version that last wrote the cache (informational). */
+	version: string;
+	/** sha256 of the embedded catalog the cache was written against. */
+	embeddedHash: string;
+	models: JsonModel[];
+}
+
+/**
+ * Deterministic stamp for the embedded catalog: any models.json change
+ * invalidates caches written against the previous content, so curated fixes
+ * shipped in a release are never masked by an older on-disk cache.
+ */
+export function embeddedCatalogHash(models: JsonModel[]): string {
+	return createHash("sha256").update(JSON.stringify(models)).digest("hex");
+}
+
+/**
+ * Parse the on-disk cache payload. Accepts the version-stamped envelope;
+ * legacy versions wrote a bare array, treated as an unknown embeddedHash so
+ * the embedded catalog wins shared ids until the cache is rewritten.
+ */
+export function parseModelsCache(raw: unknown): ModelsCache | null {
+	if (Array.isArray(raw)) return { version: "", embeddedHash: "", models: raw as JsonModel[] };
+	if (typeof raw !== "object" || raw === null) return null;
+	const r = raw as Record<string, unknown>;
+	if (!Array.isArray(r.models)) return null;
+	return {
+		version: typeof r.version === "string" ? r.version : "",
+		embeddedHash: typeof r.embeddedHash === "string" ? r.embeddedHash : "",
+		models: r.models as JsonModel[],
+	};
+}
+
+/**
+ * Reconcile the stale cache against this release's embedded catalog.
+ *   - preferEmbedded=false (cache hash matches): the cache keeps precedence
+ *     for shared ids (it may hold live-merged data newer than the embedded
+ *     snapshot) and embedded fills gaps.
+ *   - preferEmbedded=true (hash mismatch / legacy cache): embedded curation
+ *     wins shared ids; the cache contributes only ids the embedded list lacks.
+ * In both directions, ids owned by the deprecation graveyard are dropped from
+ * the cache: the grace layer is the single owner of a delisted model's
+ * lifetime (it re-adds within-TTL ids and stops serving expired ones).
+ */
+export function mergeStaleModels(
+	cached: JsonModel[],
+	embedded: JsonModel[],
+	preferEmbedded: boolean,
+	graveyard: DeprecatedData,
+): JsonModel[] {
+	if (preferEmbedded) {
+		const embeddedMap = new Map(embedded.map((m) => [m.id, m]));
+		const extras = cached.filter((m) => !embeddedMap.has(m.id) && !graveyard[m.id]);
+		return [...embedded, ...extras];
+	}
+	const cachedIds = new Set(cached.map((m) => m.id));
+	const extras = embedded.filter((m) => !cachedIds.has(m.id));
+	const kept = cached.filter((m) => !graveyard[m.id]);
+	return [...kept, ...extras];
 }
 
 // ─── Deprecation grace ────────────────────────────────────────────────────────
