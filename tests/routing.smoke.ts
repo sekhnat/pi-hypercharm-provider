@@ -245,7 +245,7 @@ async function sessionStart(h: Harness): Promise<void> {
 	const panel = sidebarPanel(h);
 	assert.equal(panel?.id, "hypercharm:usage");
 	assert.deepEqual(panel?.rows.at(0), { text: "⚡ 1.24 hc · 1 req", role: "muted" });
-	assert.deepEqual(panel?.rows.at(-1), { text: "996/1k/h · 10k/10k/d", role: "muted" });
+	assert.deepEqual(panel?.rows.at(-1), { text: "day [■■■■■■■■] 10k/10k", role: "muted" });
 	assert.equal(h.statuses.get("hypercharm-session"), undefined);
 	assert.equal(h.statuses.get("hypercharm-account"), undefined);
 	assert.equal(h.widget.value, undefined);

@@ -45,10 +45,18 @@ const registers = (bus: { emitted: Array<Record<string, unknown>> }) =>
 const unregisters = (bus: { emitted: Array<Record<string, unknown>> }) =>
 	bus.emitted.filter((event) => event.type === "unregister");
 
+// Representative full-data payload in the current row layout: session block,
+// divider, then account rows — pins that the wire passes the new shapes
+// (divider, meters, per-row roles) through untouched.
 const usagePanel = {
 	id: "hypercharm:usage" as const,
 	title: "HyperCharm",
-	rows: [{ text: "⚡ 1.24 hc · 7 req", role: "muted" as const }],
+	rows: [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" as const },
+		{ text: "────────────", role: "dim" as const },
+		{ text: "◆ 249 hc", role: "ready" as const },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" as const },
+	],
 	defaults: { visible: true, after: "usage" },
 };
 
@@ -85,7 +93,17 @@ const usagePanel = {
 			source: "hypercharm",
 			revision: 1,
 			requestId: "atelier-1",
-			panel: { id: "hypercharm:usage", title: "HyperCharm", rows: [{ text: "⚡ 1.24 hc · 7 req", role: "muted" }], defaults: { visible: true, after: "usage" } },
+			panel: {
+				id: "hypercharm:usage",
+				title: "HyperCharm",
+				rows: [
+					{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+					{ text: "────────────", role: "dim" },
+					{ text: "◆ 249 hc", role: "ready" },
+					{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+				],
+				defaults: { visible: true, after: "usage" },
+			},
 		},
 	);
 	publisher.dispose();
@@ -156,6 +174,18 @@ const usagePanel = {
 	bus.discover([SIDEBAR_PANEL_DEFAULTS_CAPABILITY]);
 	assert.ok(maxRevision(bus.emitted) > 2);
 	second.dispose();
+}
+
+// Idle placeholder row passes through byte-identically (no divider injected).
+{
+	resetSidebarRevisionsForTest();
+	const bus = fakeBus();
+	const publisher = createSidebarUsagePublisher(bus, "hypercharm:usage");
+	bus.discover([SIDEBAR_PANEL_DEFAULTS_CAPABILITY]);
+	publisher.update({ ...usagePanel, rows: [{ text: "no usage yet this session", role: "muted" }] });
+	const last = registers(bus).at(-1);
+	assert.deepEqual((last?.panel as { rows: unknown }).rows, [{ text: "no usage yet this session", role: "muted" }]);
+	publisher.dispose();
 }
 
 console.log("sidebar.smoke: all assertions passed");

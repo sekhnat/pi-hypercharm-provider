@@ -12,6 +12,8 @@ import {
 	accountHasData,
 	applyOptimisticSpend,
 	buildAccountTiers,
+	buildAccountSidebarRows,
+	buildRateMeter,
 	buildSidebarPanel,
 	buildSidebarRows,
 	buildSessionLine,
@@ -19,10 +21,13 @@ import {
 	formatBalHc,
 	formatRateCompact,
 	formatSpendHc,
+	SIDEBAR_DIVIDER_ROW,
+	SIDEBAR_METER_CELLS,
 	SIDEBAR_PLACEHOLDER_ROW,
 	termVisWidth,
 	truncateAnsi,
 	type AccountState,
+	type SidebarRow,
 } from "../status.ts";
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const fakeTheme = { fg: (_c: string, t: string) => `\x1b[2m${t}\x1b[39m` };
@@ -72,31 +77,110 @@ assert.ok(balOnly.includes("12 hc"));
 
 const sidebarRowsOf = (accountState: AccountState, lowBalance: boolean) =>
 	buildSidebarRows({ requests: 7, spendHc: 1.24 }, accountState, lowBalance);
-// ── sidebar panel rows (layout C) ──
+// ── sidebar panel rows (one fact per row) ──
 {
 	const sidebarRows = buildSidebarRows({ requests: 7, spendHc: 1.24 }, full, false);
 	assert.deepEqual(sidebarRows, [
 		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
 		{ text: "◆ 249 hc", role: "ready" },
-		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
 	]);
-	// missing rate + auth atoms: limits row omitted entirely
+	// missing rate + auth atoms: limit and expiry rows omitted, divider stays
 	const noRate = sidebarRowsOf(acc({ balance: 249 }), false);
 	assert.deepEqual(noRate, [
 		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
 		{ text: "◆ 249 hc", role: "ready" },
 	]);
 	// team name never appears
 	for (const row of sidebarRows) assert.ok(!row.text.includes("ACME"));
-	// low balance flips the balance row role
+	// low balance flips only the balance row role
 	const low = sidebarRowsOf({ ...EMPTY_ACCOUNT, balance: 10 }, true);
-	assert.deepEqual(low[1], { text: "◆ 10 hc", role: "warning" });
-	// no activity → no session row
+	assert.deepEqual(low[2], { text: "◆ 10 hc", role: "warning" });
+	for (const row of low) assert.ok(row.role !== "warning" || row.text.includes("◆"), "only the balance row warns");
+	// no activity → no session row, no divider
 	const idle = buildSidebarRows(EMPTY_SESSION_STATS, full, false);
 	assert.deepEqual(idle, [
 		{ text: "◆ 249 hc", role: "ready" },
-		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
 	]);
+	// session-only: no divider without account rows
+	assert.deepEqual(buildSidebarRows({ requests: 7, spendHc: 1.24 }, acc({}), false), [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+	]);
+	// nothing at all → no rows (the panel decision layer substitutes the placeholder)
+	assert.deepEqual(buildSidebarRows(EMPTY_SESSION_STATS, acc({}), false), []);
+}
+
+// ── rate meter ──
+{
+	assert.equal(SIDEBAR_METER_CELLS, 8);
+	assert.equal(buildRateMeter(996, 1000), "[■■■■■■■■]", "996/1000 fills 7.968 → rounds to full");
+	assert.equal(buildRateMeter(500, 1000), "[■■■■····]");
+	assert.equal(buildRateMeter(0, 500), "[········]", "zero remaining → empty meter; counts 0/500 stay on the row");
+	assert.equal(buildRateMeter(1250, 1000), "[■■■■■■■■]", "remaining above the limit clamps to full");
+	assert.equal(buildRateMeter(-5, 1000), "[········]", "negative remaining clamps to empty");
+	assert.equal(buildRateMeter(Number.NaN, 1000), "[········]", "NaN remaining never produces NaN cells");
+	assert.equal(buildRateMeter(10, Number.NaN), "[········]");
+	assert.equal(buildRateMeter(10, 0), "[········]", "zero limit renders empty; the row itself is omitted");
+	// zero/unknown limits omit the whole rate-limit row
+	const zeroLimits = buildAccountSidebarRows(
+		acc({ rate: { limitHour: 0, limitDay: 0, remainingHour: 0, remainingDay: 0, capturedAt: 0 } }),
+		false,
+	);
+	assert.deepEqual(zeroLimits, []);
+	const dayOnly = buildAccountSidebarRows(
+		acc({ rate: { limitHour: 0, limitDay: 10000, remainingHour: 0, remainingDay: 2500, capturedAt: 0 } }),
+		false,
+	);
+	assert.deepEqual(dayOnly, [{ text: "day [■■······] 2.5k/10k", role: "muted" }]);
+	// account block alone (no session row): balance, meters, expiry as separate rows
+	assert.deepEqual(buildAccountSidebarRows(full, false), [
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
+	]);
+}
+
+// ── sidebar row budget: 24 visible columns at the 28-column sidebar minimum ──
+{
+	const big = acc({
+		balance: 1_250_000,
+		rate: { limitHour: 10000, limitDay: 10000, remainingHour: 9996, remainingDay: 9996, capturedAt: 0 },
+		authDaysLeft: 29,
+	});
+	for (const row of buildSidebarRows({ requests: 7, spendHc: 1.24 }, big, false)) {
+		assert.ok(termVisWidth(row.text) <= 24, `row exceeds 24 columns: ${row.text}`);
+	}
+	for (const row of buildSidebarRows(EMPTY_SESSION_STATS, big, false)) {
+		assert.ok(termVisWidth(row.text) <= 24, `row exceeds 24 columns: ${row.text}`);
+	}
+}
+
+// ── sanitizer survival: rows must not depend on what the host strips ──
+{
+	const fixtures: SidebarRow[][] = [
+		buildSidebarRows({ requests: 7, spendHc: 1.24 }, full, false),
+		buildSidebarRows({ requests: 7, spendHc: 1.24 }, acc({ balance: 249 }), false),
+		buildSidebarRows(EMPTY_SESSION_STATS, full, false),
+		buildSidebarRows(EMPTY_SESSION_STATS, acc({}), false),
+	];
+	for (const rows of fixtures) {
+		for (const row of rows) {
+			assert.ok(!row.text.includes("\x1b"), `ANSI in row: ${row.text}`);
+			assert.equal(row.text, row.text.replace(/\s+/g, " ").trim(), `unsanitary row: ${row.text}`);
+			assert.ok(termVisWidth(row.text) > 0, `zero-width row (host drops it): ${row.text}`);
+		}
+	}
+	// divider survives host whitespace-collapse and zero-width filtering
+	assert.ok(!/\s/.test(SIDEBAR_DIVIDER_ROW.text));
+	assert.equal(termVisWidth(SIDEBAR_DIVIDER_ROW.text), 12);
 }
 
 // optimistic spend deduction
@@ -214,19 +298,24 @@ assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).
 	assert.equal(idle.publish, true);
 	assert.deepEqual(idle.rows, [{ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" }]);
 
-	// account rows land after the prefetch without any turn
+	// account rows land after the prefetch without any turn (no divider: no session row)
 	const prefetched = buildSidebarPanel({ ...base, account: full });
 	assert.deepEqual(prefetched.rows, [
 		{ text: "◆ 249 hc", role: "ready" },
-		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
 	]);
 
-	// session row appears once activity exists
+	// session row appears once activity exists, with the divider between blocks
 	const active = buildSidebarPanel({ ...base, sessionStats: { requests: 7, spendHc: 1.24 }, account: full });
 	assert.deepEqual(active.rows, [
 		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
 		{ text: "◆ 249 hc", role: "ready" },
-		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
 	]);
 
 	// withdraw while another provider is active or the host is incompatible
@@ -241,7 +330,9 @@ assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).
 	const accountOnly = buildSidebarPanel({ ...base, sessionMode: "widget", account: full });
 	assert.deepEqual(accountOnly.rows, [
 		{ text: "◆ 249 hc", role: "ready" },
-		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+		{ text: "expires 29d", role: "dim" },
 	]);
 
 	// low balance flips the account row role

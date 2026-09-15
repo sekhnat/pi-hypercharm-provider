@@ -191,7 +191,7 @@ export function buildAccountTiers(acc: AccountState, lowBalance: boolean): strin
 	return out;
 }
 
-// ─── Sidebar panel rows (layout C) ────────────────────────────────────────────
+// ─── Sidebar panel rows (one fact per row) ───────────────────────────────────
 
 export type SidebarRowRole = "primary" | "accent" | "muted" | "dim" | "ready" | "working" | "warning" | "error";
 
@@ -201,32 +201,79 @@ export interface SidebarRow {
 }
 
 /**
- * Structured rows for the Pi Atelier sidebar panel (no theme dependency):
- *   1. session spend/requests (subdued role),
- *   2. balance (warning role at/below the threshold),
- *   3. remaining hourly/daily rate limits and OAuth days remaining.
- *
- * Missing account atoms are omitted rather than replaced with placeholders,
- * and the team name is never included (Atelier owns panel identity).
+ * Rule between the session block and the account block. Non-whitespace by
+ * construction: the host sanitizes panel text (whitespace runs collapse to a
+ * single space) and drops zero-width rows, so only a glyph rule survives.
+ */
+export const SIDEBAR_DIVIDER_ROW: SidebarRow = Object.freeze({ text: "─".repeat(12), role: "dim" });
+
+/**
+ * Fixed meter cell count: 8 keeps the widest meter row (4-char label, bracketed
+ * meter, worst-case compact counts) within the ~24 usable columns of the
+ * 28-column sidebar minimum, measured the way the host measures it.
+ */
+export const SIDEBAR_METER_CELLS = 8;
+
+/**
+ * Proportional rate meter: ■ marks the remaining fraction of the limit
+ * (clamped to [0,1]), · the used fraction — the same glyph vocabulary as
+ * Atelier's built-in context panel. Non-finite inputs and non-positive limits
+ * render an empty meter; callers omit those rows entirely.
+ */
+export function buildRateMeter(remaining: number, limit: number): string {
+	const frac =
+		Number.isFinite(remaining) && Number.isFinite(limit) && limit > 0
+			? Math.min(1, Math.max(0, remaining / limit))
+			: 0;
+	const filled = Math.round(frac * SIDEBAR_METER_CELLS);
+	return `[${"■".repeat(filled)}${"·".repeat(SIDEBAR_METER_CELLS - filled)}]`;
+}
+
+/**
+ * Account block, one fact per row: balance (warning role at/below the
+ * threshold), hourly and daily meters with compact remaining/limit counts
+ * (omitted when the limit is unknown or zero), and OAuth days remaining.
+ * Missing atoms are omitted rather than replaced with placeholders, and the
+ * team name is never included (Atelier owns panel identity).
+ */
+export function buildAccountSidebarRows(acc: AccountState, lowBalance: boolean): SidebarRow[] {
+	const rows: SidebarRow[] = [];
+	if (acc.balance !== null) {
+		rows.push({ text: `◆ ${formatBalHc(acc.balance)} hc`, role: lowBalance ? "warning" : "ready" });
+	}
+	if (acc.rate !== null) {
+		if (acc.rate.limitHour > 0) {
+			rows.push({
+				text: `hour ${buildRateMeter(acc.rate.remainingHour, acc.rate.limitHour)} ${formatRateCompact(acc.rate.remainingHour)}/${formatRateCompact(acc.rate.limitHour)}`,
+				role: "muted",
+			});
+		}
+		if (acc.rate.limitDay > 0) {
+			rows.push({
+				text: `day ${buildRateMeter(acc.rate.remainingDay, acc.rate.limitDay)} ${formatRateCompact(acc.rate.remainingDay)}/${formatRateCompact(acc.rate.limitDay)}`,
+				role: "muted",
+			});
+		}
+	}
+	if (acc.authDaysLeft !== null) {
+		rows.push({ text: `expires ${acc.authDaysLeft}d`, role: "dim" });
+	}
+	return rows;
+}
+
+/**
+ * Full panel body: session row, a divider only when both blocks have content,
+ * then the account rows. Every row is single-space separated and glyph-only —
+ * the host sanitizes panel text (strips ANSI, collapses whitespace runs), so
+ * layout must not depend on padding or escape codes.
  */
 export function buildSidebarRows(stats: SessionStats, acc: AccountState, lowBalance: boolean): SidebarRow[] {
 	const rows: SidebarRow[] = [];
 	const sessionLine = buildSessionLine(stats);
 	if (sessionLine) rows.push({ text: sessionLine, role: "muted" });
-	if (acc.balance !== null) {
-		rows.push({ text: `◆ ${formatBalHc(acc.balance)} hc`, role: lowBalance ? "warning" : "ready" });
-	}
-	const hourRate =
-		acc.rate !== null
-			? `${formatRateCompact(acc.rate.remainingHour)}/${formatRateCompact(acc.rate.limitHour)}/h`
-			: undefined;
-	const dayRate =
-		acc.rate !== null
-			? `${formatRateCompact(acc.rate.remainingDay)}/${formatRateCompact(acc.rate.limitDay)}/d`
-			: undefined;
-	const auth = acc.authDaysLeft !== null ? `${acc.authDaysLeft}d` : undefined;
-	const parts = [hourRate, dayRate, auth].filter((p): p is string => p !== undefined);
-	if (parts.length > 0) rows.push({ text: parts.join(" · "), role: "muted" });
+	const accountRows = buildAccountSidebarRows(acc, lowBalance);
+	if (sessionLine && accountRows.length > 0) rows.push(SIDEBAR_DIVIDER_ROW);
+	rows.push(...accountRows);
 	return rows;
 }
 
@@ -263,24 +310,18 @@ export interface SidebarPanelDecision {
  * row when nothing has landed yet), so the panel appears at selection time
  * rather than after the first turn. The widget/statusbar activity gates live
  * in index.ts and are unaffected. Each metric lands in exactly one
- * destination, so the session row is built here only when the session part
- * targets the sidebar, and the account rows are built from empty stats for
- * the same reason.
+ * destination: parts not targeting the sidebar contribute empty snapshots to
+ * buildSidebarRows, so their metrics never render here.
  */
 export function buildSidebarPanel(options: SidebarPanelOptions): SidebarPanelDecision {
 	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance } = options;
 	if (!compatible || !isProviderActive) return { publish: false, rows: [] };
 	if (sessionMode !== "sidebar" && accountMode !== "sidebar") return { publish: false, rows: [] };
-	const rows: SidebarRow[] = [];
-	if (sessionMode === "sidebar") {
-		const line = buildSessionLine(sessionStats);
-		if (line) rows.push({ text: line, role: "muted" });
-	}
-	if (accountMode === "sidebar" && accountHasData(account)) {
-		// Account atoms only (balance + limits row); the session row above owns
-		// session stats so a metric never renders in two destinations.
-		rows.push(...buildSidebarRows(EMPTY_SESSION_STATS, account, lowBalance));
-	}
+	const rows = buildSidebarRows(
+		sessionMode === "sidebar" ? sessionStats : EMPTY_SESSION_STATS,
+		accountMode === "sidebar" ? account : EMPTY_ACCOUNT,
+		lowBalance,
+	);
 	if (rows.length === 0) {
 		rows.push({ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" });
 	}
@@ -292,10 +333,11 @@ export function buildSidebarPanel(options: SidebarPanelOptions): SidebarPanelDec
 // counting. ◆ is ambiguous-width but this terminal class renders it wide.
 
 const EMOJI_RE = /\p{Emoji_Presentation}/u;
-// East-Asian-Ambiguous glyphs some terminals render as 2 columns. ◆ is NOT
-// listed: pi widths it as 1 here, and counting it wide leaves a trailing gap
-// before the right edge.
-const AMBIGUOUS_WIDE = new Set(["■", "▲", "◉"]);
+// East-Asian-Ambiguous glyphs some terminals render as 2 columns. ◆ and ■ are
+// NOT listed: pi-tui — the sidebar host's width authority, which decides
+// padding and truncation — counts both as 1 column (get-east-asian-width), and
+// meter-row budget checks must agree with the host's truncation math.
+const AMBIGUOUS_WIDE = new Set(["▲", "◉"]);
 
 export function termVisWidth(str: string): number {
 	let width = 0;
