@@ -7,8 +7,8 @@
   "scripts": {
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "check": "tsc --noEmit && node tests/status.smoke.ts",
-    "smoke": "node tests/status.smoke.ts",
+    "check": "tsc --noEmit && node tests/status.smoke.ts && node tests/sidebar.smoke.ts && bun run tests/routing.smoke.ts",
+    "smoke": "node tests/status.smoke.ts && node tests/sidebar.smoke.ts && bun run tests/routing.smoke.ts",
     "update-models": "node scripts/update-models.js"
   },
   "keywords": [

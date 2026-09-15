@@ -17,7 +17,7 @@
  * glyphs like ◆ ⚡ ⚠ measure 2 columns).
  */
 
-export type DisplayMode = "widget" | "statusbar" | "off";
+export type DisplayMode = "sidebar" | "widget" | "statusbar" | "off";
 
 export interface StatusConfig {
 	/** Session spend/request line (left side). */
@@ -31,13 +31,13 @@ export interface StatusConfig {
 }
 
 export const DEFAULT_STATUS_CONFIG: StatusConfig = {
-	session: "widget",
-	account: "widget",
+	session: "sidebar",
+	account: "sidebar",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
 };
 
-const VALID_MODES = new Set<string>(["widget", "statusbar", "off"]);
+const VALID_MODES = new Set<string>(["sidebar", "widget", "statusbar", "off"]);
 
 function coerceMode(value: unknown, fallback: DisplayMode): DisplayMode {
 	return typeof value === "string" && VALID_MODES.has(value) ? (value as DisplayMode) : fallback;
@@ -189,6 +189,45 @@ export function buildAccountTiers(acc: AccountState, lowBalance: boolean): strin
 		if (t && t !== out[out.length - 1]) out.push(t);
 	}
 	return out;
+}
+
+// ─── Sidebar panel rows (layout C) ────────────────────────────────────────────
+
+export type SidebarRowRole = "primary" | "accent" | "muted" | "dim" | "ready" | "working" | "warning" | "error";
+
+export interface SidebarRow {
+	text: string;
+	role?: SidebarRowRole;
+}
+
+/**
+ * Structured rows for the Pi Atelier sidebar panel (no theme dependency):
+ *   1. session spend/requests (subdued role),
+ *   2. balance (warning role at/below the threshold),
+ *   3. remaining hourly/daily rate limits and OAuth days remaining.
+ *
+ * Missing account atoms are omitted rather than replaced with placeholders,
+ * and the team name is never included (Atelier owns panel identity).
+ */
+export function buildSidebarRows(stats: SessionStats, acc: AccountState, lowBalance: boolean): SidebarRow[] {
+	const rows: SidebarRow[] = [];
+	const sessionLine = buildSessionLine(stats);
+	if (sessionLine) rows.push({ text: sessionLine, role: "muted" });
+	if (acc.balance !== null) {
+		rows.push({ text: `◆ ${formatBalHc(acc.balance)} hc`, role: lowBalance ? "warning" : "ready" });
+	}
+	const hourRate =
+		acc.rate !== null
+			? `${formatRateCompact(acc.rate.remainingHour)}/${formatRateCompact(acc.rate.limitHour)}/h`
+			: undefined;
+	const dayRate =
+		acc.rate !== null
+			? `${formatRateCompact(acc.rate.remainingDay)}/${formatRateCompact(acc.rate.limitDay)}/d`
+			: undefined;
+	const auth = acc.authDaysLeft !== null ? `${acc.authDaysLeft}d` : undefined;
+	const parts = [hourRate, dayRate, auth].filter((p): p is string => p !== undefined);
+	if (parts.length > 0) rows.push({ text: parts.join(" · "), role: "muted" });
+	return rows;
 }
 
 // ─── Terminal width math ──────────────────────────────────────────────────────

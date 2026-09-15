@@ -54,24 +54,28 @@
  * Display Configuration:
  *   Create ~/.pi/agent/extensions/hypercharm.json:
  *   {
- *     "session": "widget",            // "widget" | "statusbar" | "off"
- *     "account": "widget",            // "widget" | "statusbar" | "off"
+ *     "session": "sidebar",           // "sidebar" | "widget" | "statusbar" | "off"
+ *     "account": "sidebar",           // "sidebar" | "widget" | "statusbar" | "off"
  *     "hideOnOtherProvider": true,    // hide when a non-HyperCharm model is active
  *     "lowBalanceHc": 25              // warn threshold, null/false disables
  *   }
  *
- *   - "widget" (default): rendered in the below-editor status line
+ *   - "sidebar" (default): published as a structured panel to the Pi Atelier
+ *     sidebar (visible by default after Atelier's Usage panel); falls back to
+ *     the below-editor widget when no compatible Atelier host is loaded.
+ *     Sidebar contributions are always limited to the active HyperCharm
+ *     provider; hideOnOtherProvider governs only widget/statusbar.
+ *   - "widget": rendered in the below-editor status line
  *   - "statusbar": rendered in the built-in pi status bar
  *   - "off": hidden entirely (account=off also skips/quota fetches)
  *
  *   Manage interactively with /hypercharm-status, or non-interactively:
- *     /hypercharm-status session widget|statusbar|off
- *     /hypercharm-status account widget|statusbar|off
+ *     /hypercharm-status session sidebar|widget|statusbar|off
+ *     /hypercharm-status account sidebar|widget|statusbar|off
  *     /hypercharm-status hide true|false
  *     /hypercharm-status lowBalance <hc>|off
  *     /hypercharm-status refresh          (re-fetch balance/team now)
  *     /hypercharm-status reset
- *
  * Usage:
  *   # Option 1: OAuth — run pi, send /login, and pick "HyperCharm"
  *   # (device flow; provider id "hypercharm", distinct from the official
@@ -104,6 +108,7 @@ import {
 	applyOptimisticSpend,
 	buildAccountTiers,
 	buildSessionLine,
+	buildSidebarRows,
 	coerceStatusConfig,
 	DEFAULT_STATUS_CONFIG,
 	EMPTY_ACCOUNT,
@@ -112,8 +117,10 @@ import {
 	accountHasData,
 	type AccountState,
 	type SessionStats,
+	type SidebarRow,
 	type StatusConfig,
 } from "./status";
+import { createSidebarUsagePublisher, type EventTransport, type SidebarUsagePublisher } from "./sidebar";
 import fs from "fs";
 import { hostname } from "os";
 import path from "path";
@@ -709,6 +716,23 @@ const WIDGET_KEY = "hypercharm";
 const STATUS_KEY_SESSION = "hypercharm-session";
 const STATUS_KEY_ACCOUNT = "hypercharm-account";
 
+// Sidebar panel publisher. The event bus arrives at factory time
+// (initSidebarPublisher) because renderStatus runs before and outside session
+// lifecycle events; a compatible Pi Atelier host is observed via discovery.
+let sidebarPublisher: SidebarUsagePublisher | undefined;
+/** Inert bus so render paths stay safe before the factory wires the real one. */
+const NoopEventTransport = {
+	on: () => () => undefined,
+	emit: () => undefined,
+} satisfies Pick<EventTransport, "on" | "emit">;
+
+function initSidebarPublisher(pi: ExtensionAPI): void {
+	sidebarPublisher = createSidebarUsagePublisher(pi.events, "hypercharm:usage");
+}
+
+const publisher = (): SidebarUsagePublisher =>
+	sidebarPublisher ?? createSidebarUsagePublisher(NoopEventTransport, "hypercharm:usage");
+
 function currentProviderId(ctx: ExtensionContext): string | undefined {
 	// ctx.model is a getter that can throw on stale contexts
 	try {
@@ -743,6 +767,7 @@ function updateStatusAfter(promise: Promise<void>, ctx: ExtensionContext): void 
 
 function renderStatus(ctx: ExtensionContext): void {
 	const provider = currentProviderId(ctx);
+	const isHyperCharmActive = provider === undefined || provider === PROVIDER_ID;
 	const hiddenByOtherProvider =
 		statusConfig.hideOnOtherProvider && provider !== undefined && provider !== PROVIDER_ID;
 
@@ -750,6 +775,7 @@ function renderStatus(ctx: ExtensionContext): void {
 		ctx.ui.setStatus(STATUS_KEY_SESSION, undefined);
 		ctx.ui.setStatus(STATUS_KEY_ACCOUNT, undefined);
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
+		publisher().withdraw();
 	};
 
 	if (hiddenByOtherProvider) {
@@ -767,7 +793,43 @@ function renderStatus(ctx: ExtensionContext): void {
 		statusConfig.lowBalanceHc !== null && account.balance !== null && account.balance <= statusConfig.lowBalanceHc;
 	const accTiers = accountVisible ? buildAccountTiers(account, lowBalance) : [];
 
-	// Status bar (built-in footer slots)
+	// Sidebar panel: parts targeted at "sidebar" publish here whenever a
+	// compatible host is present, gated on the active provider (the legacy
+	// hideOnOtherProvider option governs only widget/statusbar). Without a
+	// compatible host, sidebar parts fall back to the widget below. Each
+	// metric lands in exactly one destination because routing switches on the
+	// part's mode.
+	const sidebarCompatible = publisher().isCompatible() && isHyperCharmActive;
+	const sessionInSidebar = statusConfig.session === "sidebar" && sidebarCompatible;
+	const accountInSidebar = statusConfig.account === "sidebar" && sidebarCompatible;
+	if (sidebarCompatible && (statusConfig.session === "sidebar" || statusConfig.account === "sidebar")) {
+		const sidebarRows: SidebarRow[] = [];
+		if (hasActivity && statusConfig.session === "sidebar") {
+			const line = buildSessionLine(sessionStats);
+			if (line) sidebarRows.push({ text: line, role: "muted" });
+		}
+		if (statusConfig.account === "sidebar" && accountVisible) {
+			// Account atoms directly (balance + limits row); the session row is
+			// handled above, so pass empty stats to skip it rather than slicing.
+			sidebarRows.push(...buildSidebarRows(EMPTY_SESSION_STATS, account, lowBalance));
+		}
+		if (sidebarRows.length > 0) {
+			publisher().update({
+				id: "hypercharm:usage",
+				title: "HyperCharm",
+				rows: sidebarRows,
+				defaults: { visible: true, after: "usage" },
+			});
+		} else {
+			publisher().withdraw();
+		}
+	} else {
+		// Sidebar parts fall back to the widget without a compatible host, or
+		// withdraw entirely while another provider is active.
+		publisher().withdraw();
+	}
+
+	// Status bar (built-in footer slots) — statusbar-targeted parts only.
 	const sBar = statusConfig.session === "statusbar" ? sessionLine : undefined;
 	const aBar = statusConfig.account === "statusbar" && accountVisible ? accTiers[0] : undefined;
 	if (sBar && aBar) {
@@ -779,9 +841,18 @@ function renderStatus(ctx: ExtensionContext): void {
 		ctx.ui.setStatus(STATUS_KEY_ACCOUNT, aBar ? ctx.ui.theme.fg(lowBalance ? "warning" : "dim", aBar) : undefined);
 	}
 
-	// Below-editor widget (two-zone, width-aware)
-	const leftW = statusConfig.session === "widget" ? sessionLine : undefined;
-	const rightW = statusConfig.account === "widget" && accountVisible ? accTiers : undefined;
+	// Below-editor widget (two-zone, width-aware). Sidebar parts route here as
+	// their fallback when no compatible host is present; a sidebar part with a
+	// compatible host must not duplicate into the widget.
+	const leftW =
+		statusConfig.session === "widget" || (statusConfig.session === "sidebar" && !sidebarCompatible)
+			? sessionLine
+			: undefined;
+	const rightW =
+		(statusConfig.account === "widget" || (statusConfig.account === "sidebar" && !sidebarCompatible)) &&
+		accountVisible
+			? accTiers
+			: undefined;
 	if (leftW !== undefined || (rightW !== undefined && rightW.length > 0)) {
 		ctx.ui.setWidget(
 			WIDGET_KEY,
@@ -841,7 +912,7 @@ function statusSummary(): string {
 }
 
 const STATUS_USAGE =
-	"Usage: /hypercharm-status [session|account widget|statusbar|off · hide true|false · lowBalance <hc>|off · refresh · reset]";
+	"Usage: /hypercharm-status [session|account sidebar|widget|statusbar|off · hide true|false · lowBalance <hc>|off · refresh · reset]";
 
 async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise<void> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -880,7 +951,7 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 	}
 
 	if ((key === "session" || key === "account") && tokens.length === 2) {
-		if (value !== "widget" && value !== "statusbar" && value !== "off") {
+		if (value !== "sidebar" && value !== "widget" && value !== "statusbar" && value !== "off") {
 			ctx.ui.notify(STATUS_USAGE, "error");
 			return;
 		}
@@ -929,7 +1000,7 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 }
 
 async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> {
-	const modes = ["widget", "statusbar", "off"] as const;
+	const modes = ["sidebar", "widget", "statusbar", "off"] as const;
 	const nextMode = (m: string) => modes[(modes.indexOf(m as any) + 1) % modes.length];
 
 	for (;;) {
@@ -1033,6 +1104,11 @@ export default function (pi: ExtensionAPI) {
 	const staleModels = buildModels(staleBase, customModels, patches);
 	currentModels = staleModels;
 
+	// Subscribe to sidebar discovery at factory time: Pi completes extension
+	// factory initialization before dispatching session lifecycle events, so
+	// this observes Atelier's discovery regardless of load order.
+	initSidebarPublisher(pi);
+
 	pi.registerProvider(PROVIDER_ID, makeProviderConfig(staleModels));
 
 	pi.registerCommand("hypercharm-status", {
@@ -1117,5 +1193,6 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY_SESSION, undefined);
 		ctx.ui.setStatus(STATUS_KEY_ACCOUNT, undefined);
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
+		publisher().withdraw();
 	});
 }

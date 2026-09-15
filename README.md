@@ -164,16 +164,25 @@ Edit `~/.pi/agent/extensions/hypercharm.json` or run `/hypercharm-status`:
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `session` | `widget` \| `statusbar` \| `off` | `widget` |
-| `account` | `widget` \| `statusbar` \| `off` | `widget` |
+| `session` | `sidebar` \| `widget` \| `statusbar` \| `off` | `sidebar` |
+| `account` | `sidebar` \| `widget` \| `statusbar` \| `off` | `sidebar` |
 | `hideOnOtherProvider` | `true` \| `false` | `true` |
 | `lowBalanceHc` | number \| `null` | `25` |
+
+The `sidebar` mode publishes a structured panel (`HyperCharm`) to the
+[Pi Atelier](https://github.com/michaelmjhhhh/pi-atelier) sidebar — visible by
+default right after Atelier's built-in Usage panel. Sidebar contributions are
+always limited to the active HyperCharm provider (the `hideOnOtherProvider`
+option governs only the widget/statusbar destinations). Without a compatible
+Atelier host, `sidebar` parts fall back to the below-editor widget. The same
+metric never appears in two destinations; the team name never appears in the
+sidebar.
 
 Non-interactive toggles:
 
 ```
-/hypercharm-status session widget|statusbar|off
-/hypercharm-status account widget|statusbar|off
+/hypercharm-status session sidebar|widget|statusbar|off
+/hypercharm-status account sidebar|widget|statusbar|off
 /hypercharm-status hide true|false
 /hypercharm-status lowBalance 50|off
 /hypercharm-status refresh

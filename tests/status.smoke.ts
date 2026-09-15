@@ -7,10 +7,12 @@
 import assert from "node:assert/strict";
 import {
 	EMPTY_ACCOUNT,
+	EMPTY_SESSION_STATS,
 	StatusLineWidget,
 	accountHasData,
 	applyOptimisticSpend,
 	buildAccountTiers,
+	buildSidebarRows,
 	buildSessionLine,
 	coerceStatusConfig,
 	formatBalHc,
@@ -20,7 +22,6 @@ import {
 	truncateAnsi,
 	type AccountState,
 } from "../status.ts";
-
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const fakeTheme = { fg: (_c: string, t: string) => `\x1b[2m${t}\x1b[39m` };
 
@@ -65,6 +66,36 @@ assert.deepEqual(buildAccountTiers(acc({ teamName: "ACME" }), false), ["ACME"]);
 const balOnly = buildAccountTiers(acc({ balance: 12 }), true);
 assert.equal(balOnly[0], "⚠ ◆ 12 hc");
 assert.ok(balOnly.includes("12 hc"));
+
+
+const sidebarRowsOf = (accountState: AccountState, lowBalance: boolean) =>
+	buildSidebarRows({ requests: 7, spendHc: 1.24 }, accountState, lowBalance);
+// ── sidebar panel rows (layout C) ──
+{
+	const sidebarRows = buildSidebarRows({ requests: 7, spendHc: 1.24 }, full, false);
+	assert.deepEqual(sidebarRows, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+	]);
+	// missing rate + auth atoms: limits row omitted entirely
+	const noRate = sidebarRowsOf(acc({ balance: 249 }), false);
+	assert.deepEqual(noRate, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		{ text: "◆ 249 hc", role: "ready" },
+	]);
+	// team name never appears
+	for (const row of sidebarRows) assert.ok(!row.text.includes("ACME"));
+	// low balance flips the balance row role
+	const low = sidebarRowsOf({ ...EMPTY_ACCOUNT, balance: 10 }, true);
+	assert.deepEqual(low[1], { text: "◆ 10 hc", role: "warning" });
+	// no activity → no session row
+	const idle = buildSidebarRows(EMPTY_SESSION_STATS, full, false);
+	assert.deepEqual(idle, [
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "996/1k/h · 10k/10k/d · 29d", role: "muted" },
+	]);
+}
 
 // optimistic spend deduction
 {
@@ -137,14 +168,14 @@ assert.ok(new StatusLineWidget(markTheme, "", buildAccountTiers(acc({ balance: 1
 
 // ── config coercion ──
 assert.deepEqual(coerceStatusConfig(undefined), {
-	session: "widget",
-	account: "widget",
+	session: "sidebar",
+	account: "sidebar",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
 });
 assert.deepEqual(coerceStatusConfig({ session: "bogus", lowBalanceHc: -3 }), {
-	session: "widget",
-	account: "widget",
+	session: "sidebar",
+	account: "sidebar",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
 });
@@ -154,8 +185,15 @@ assert.deepEqual(coerceStatusConfig({ session: "statusbar", account: "off", hide
 	hideOnOtherProvider: false,
 	lowBalanceHc: null,
 });
+assert.deepEqual(coerceStatusConfig({ session: "widget", account: "widget" }), {
+	session: "widget",
+	account: "widget",
+	hideOnOtherProvider: true,
+	lowBalanceHc: 25,
+});
 assert.equal(coerceStatusConfig({ lowBalanceHc: 42 }).lowBalanceHc, 42);
 assert.equal(coerceStatusConfig({ lowBalanceHc: false }).lowBalanceHc, null);
-assert.deepEqual(coerceStatusConfig(null).session, "widget");
+assert.deepEqual(coerceStatusConfig(null).session, "sidebar");
+assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).session, "sidebar");
 
 console.log("status.smoke: all assertions passed");
