@@ -208,6 +208,15 @@ const sidebarPanel = (h: Harness) => {
 	return event?.panel as { id: string; rows: Array<{ text: string; role?: string }> } | undefined;
 };
 
+/** Drain pending promise continuations: the credits prefetch chain uses no
+ * timers, so a few event-loop ticks settle it deterministically — no
+ * wall-clock polling budget to race against. */
+async function settlePromises(): Promise<void> {
+	for (let i = 0; i < 10; i += 1) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+}
+
 async function sessionStart(h: Harness): Promise<void> {
 	for (const handler of h.eventHandlers.get("session_start") ?? []) {
 		await handler({ reason: "startup" }, h.ctx);
@@ -229,14 +238,10 @@ async function sessionStart(h: Harness): Promise<void> {
 	await h.runCommand("account sidebar");
 	await h.discover(["panel-defaults-v1"]);
 	await h.runTurn();
-	// The credits prefetch resolves asynchronously; agent_settled's poll also
-	// throttles, so wait for the fetched balance to land before asserting.
-	for (let attempt = 0; attempt < 50; attempt += 1) {
-		const rows = (registers(h).at(-1)?.panel as { rows?: Array<{ text: string }> } | undefined)?.rows ?? [];
-		if (rows.some((row) => row.text.includes("996"))) break;
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		await h.selectModel("hypercharm");
-	}
+	// The credits prefetch resolves through promise continuations only, so a
+	// deterministic event-loop drain replaces the wall-clock poll loop (which
+	// also poked selectModel per attempt just to re-render).
+	await settlePromises();
 	const panel = sidebarPanel(h);
 	assert.equal(panel?.id, "hypercharm:usage");
 	assert.deepEqual(panel?.rows.at(0), { text: "⚡ 1.24 hc · 1 req", role: "muted" });
