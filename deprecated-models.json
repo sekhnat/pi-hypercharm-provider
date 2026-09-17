@@ -1,1 +1,339 @@
-{}
+{
+  "glm-5": {
+    "id": "glm-5",
+    "name": "GLM-5",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": null,
+      "xhigh": null,
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.86,
+      "output": 2.752,
+      "cacheRead": 0.43,
+      "cacheWrite": 0
+    },
+    "contextWindow": 202752,
+    "maxTokens": 20275,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "glm-5.1": {
+    "id": "glm-5.1",
+    "name": "GLM-5.1",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": null,
+      "xhigh": null,
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 1.358,
+      "output": 4.268,
+      "cacheRead": 0.679,
+      "cacheWrite": 0
+    },
+    "contextWindow": 202750,
+    "maxTokens": 3276,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "kimi-k2.5": {
+    "id": "kimi-k2.5",
+    "name": "Kimi K2.5",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": null,
+      "xhigh": null,
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.5584,
+      "output": 2.935,
+      "cacheRead": 0.2792,
+      "cacheWrite": 0
+    },
+    "contextWindow": 262144,
+    "maxTokens": 26214,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "kimi-k2.6": {
+    "id": "kimi-k2.6",
+    "name": "Kimi K2.6",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": null,
+      "minimal": null,
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": null,
+      "max": null
+    },
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 1.03436,
+      "output": 4.3552,
+      "cacheRead": 0.174208,
+      "cacheWrite": 0
+    },
+    "contextWindow": 262000,
+    "maxTokens": 26214,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": true,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "llama-3.3-70b-instruct": {
+    "id": "llama-3.3-70b-instruct",
+    "name": "Llama 3.3 70B Instruct",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": null,
+      "xhigh": null,
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.6066,
+      "output": 1.0386,
+      "cacheRead": 0.3033,
+      "cacheWrite": 0
+    },
+    "contextWindow": 128000,
+    "maxTokens": 12800,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "llama-4-maverick-17b-128e-instruct-fp8": {
+    "id": "llama-4-maverick-17b-128e-instruct-fp8",
+    "name": "Llama 4 Maverick 17B 128E Instruct FP8",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "off",
+      "minimal": null,
+      "low": null,
+      "medium": null,
+      "high": null,
+      "xhigh": null,
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.25188,
+      "output": 0.82563,
+      "cacheRead": 0.12594,
+      "cacheWrite": 0
+    },
+    "contextWindow": 430000,
+    "maxTokens": 43000,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "qwen3-coder-480b-a35b-instruct-int4-mixed-ar": {
+    "id": "qwen3-coder-480b-a35b-instruct-int4-mixed-ar",
+    "name": "Qwen3 Coder 480B A35B Instruct INT4 Mixed AR",
+    "reasoning": false,
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.445,
+      "output": 2.145,
+      "cacheRead": 0.2225,
+      "cacheWrite": 0
+    },
+    "contextWindow": 106000,
+    "maxTokens": 10600,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "qwen3-next-80b-a3b-instruct": {
+    "id": "qwen3-next-80b-a3b-instruct",
+    "name": "Qwen3 Next 80B A3B Instruct",
+    "reasoning": false,
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0.1175,
+      "output": 1.136,
+      "cacheRead": 0.05875,
+      "cacheWrite": 0
+    },
+    "contextWindow": 262144,
+    "maxTokens": 26214,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": false,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "qwen3.6-flash": {
+    "id": "qwen3.6-flash",
+    "name": "Qwen3.6-Flash",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "none",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": null,
+      "max": null
+    },
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 1,
+      "output": 4,
+      "cacheRead": 0.1,
+      "cacheWrite": 1.25
+    },
+    "contextWindow": 1000000,
+    "maxTokens": 64000,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": true,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "qwen3.6-max": {
+    "id": "qwen3.6-max",
+    "name": "Qwen3.6-Max",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "none",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": null,
+      "max": null
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5
+    },
+    "contextWindow": 256000,
+    "maxTokens": 64000,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": true,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  },
+  "qwen3.6-plus": {
+    "id": "qwen3.6-plus",
+    "name": "Qwen3.6-Plus",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": "none",
+      "minimal": "minimal",
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": null,
+      "max": null
+    },
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5
+    },
+    "contextWindow": 1000000,
+    "maxTokens": 64000,
+    "compat": {
+      "supportsStore": false,
+      "supportsReasoningEffort": true,
+      "thinkingFormat": "deepseek",
+      "maxTokensField": "max_tokens"
+    },
+    "deprecatedAt": "2026-09-17T02:00:12.965Z"
+  }
+}

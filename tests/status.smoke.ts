@@ -9,6 +9,8 @@ import {
 	EMPTY_ACCOUNT,
 	EMPTY_SESSION_STATS,
 	StatusLineWidget,
+	ASCII_GLYPHS,
+	UNICODE_GLYPHS,
 	accountHasData,
 	applyOptimisticSpend,
 	buildAccountTiers,
@@ -18,12 +20,15 @@ import {
 	buildSidebarRows,
 	buildSessionLine,
 	coerceStatusConfig,
+	detectLegacyTerminal,
 	formatBalHc,
 	formatRateCompact,
 	formatSpendHc,
 	SIDEBAR_DIVIDER_ROW,
 	SIDEBAR_METER_CELLS,
 	SIDEBAR_PLACEHOLDER_ROW,
+	resolveGlyphSet,
+	resolveWidgetGlyphSet,
 	termVisWidth,
 	truncateAnsi,
 	type AccountState,
@@ -210,38 +215,41 @@ assert.equal(truncateAnsi("abc", 0), "");
 
 // ── widget render ──
 const left = buildSessionLine({ requests: 7, spendHc: 1.24 })!;
+assert.ok(left.startsWith("\u26A1 "), "unicode glyph set is the default");
 const widget = new StatusLineWidget(fakeTheme, left, tiers, false);
 
-// Wide: full tier, left-right justified, exactly width columns
+// Wide: full tier, left-right justified at width − 1 (the widget never
+// paints the terminal's last column — legacy terminals treat that cell as a
+// pending wrap).
 const wide = widget.render(80);
 assert.equal(wide.length, 1);
-assert.equal(termVisWidth(wide[0]), 80);
+assert.equal(termVisWidth(wide[0]), 79);
 assert.ok(stripAnsi(wide[0]).startsWith("⚡ 1.24 hc"));
 assert.ok(stripAnsi(wide[0]).endsWith("⟳ 29d"));
 
-// Medium: drops to a compressed tier, still exactly width
+// Medium: drops to a compressed tier, still exactly width − 1
 const med = widget.render(52);
-assert.equal(termVisWidth(med[0]), 52);
+assert.equal(termVisWidth(med[0]), 51);
 assert.ok(!stripAnsi(med[0]).includes("⟳"), "compressed tiers drop auth first");
 
 // Narrow: no tier fits → left only, padded
 const narrow = widget.render(termVisWidth(left) + 3);
-assert.equal(termVisWidth(narrow[0]), termVisWidth(left) + 3);
+assert.equal(termVisWidth(narrow[0]), termVisWidth(left) + 2);
 assert.ok(stripAnsi(narrow[0]).startsWith("⚡"));
 assert.ok(!stripAnsi(narrow[0]).includes("◆"));
 
 // Narrower than left itself: truncation never overflows (crash guard)
 const tiny = widget.render(10);
-assert.equal(termVisWidth(tiny[0]), 10);
+assert.equal(termVisWidth(tiny[0]), 9);
 
 // Left empty (session gated) → right-aligned account line
 const rightOnly = new StatusLineWidget(fakeTheme, "", tiers, false);
 const ro = rightOnly.render(70);
-assert.equal(termVisWidth(ro[0]), 70);
+assert.equal(termVisWidth(ro[0]), 69);
 assert.ok(stripAnsi(ro[0]).endsWith("⟳ 29d"));
 
 // No data at all
-assert.deepEqual(new StatusLineWidget(fakeTheme, "", [], false).render(40), [fakeTheme.fg("dim", "") + " ".repeat(40)]);
+assert.deepEqual(new StatusLineWidget(fakeTheme, "", [], false).render(40), [fakeTheme.fg("dim", "") + " ".repeat(39)]);
 
 // Warning color wired through
 const warn = new StatusLineWidget(fakeTheme, "", buildAccountTiers(acc({ balance: 10 }), true), true);
@@ -258,24 +266,28 @@ assert.deepEqual(coerceStatusConfig(undefined), {
 	account: "sidebar",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
+	glyphs: "auto",
 });
 assert.deepEqual(coerceStatusConfig({ session: "bogus", lowBalanceHc: -3 }), {
 	session: "sidebar",
 	account: "sidebar",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
+	glyphs: "auto",
 });
 assert.deepEqual(coerceStatusConfig({ session: "statusbar", account: "off", hideOnOtherProvider: false, lowBalanceHc: null }), {
 	session: "statusbar",
 	account: "off",
 	hideOnOtherProvider: false,
 	lowBalanceHc: null,
+	glyphs: "auto",
 });
 assert.deepEqual(coerceStatusConfig({ session: "widget", account: "widget" }), {
 	session: "widget",
 	account: "widget",
 	hideOnOtherProvider: true,
 	lowBalanceHc: 25,
+	glyphs: "auto",
 });
 assert.equal(coerceStatusConfig({ lowBalanceHc: 42 }).lowBalanceHc, 42);
 assert.equal(coerceStatusConfig({ lowBalanceHc: false }).lowBalanceHc, null);
@@ -340,4 +352,73 @@ assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).
 	assert.deepEqual(lowBal.rows, [{ text: "◆ 10 hc", role: "warning" }]);
 }
 
+// ── legacy-terminal glyph policy ──
+const mintty = { TERM_PROGRAM: "mintty", TERM: "xterm" } as NodeJS.ProcessEnv;
+const cygwin = { TERM: "cygwin" } as NodeJS.ProcessEnv;
+const wt = { TERM_PROGRAM: "Windows_Terminal", TERM: "xterm-256color" } as NodeJS.ProcessEnv;
+assert.equal(detectLegacyTerminal(mintty), true);
+assert.equal(detectLegacyTerminal(cygwin), true);
+assert.equal(detectLegacyTerminal(wt), false);
+assert.equal(detectLegacyTerminal({} as NodeJS.ProcessEnv), false);
+
+assert.equal(resolveGlyphSet("auto", wt), UNICODE_GLYPHS);
+assert.equal(resolveGlyphSet("auto", mintty), ASCII_GLYPHS);
+assert.equal(resolveGlyphSet("unicode", mintty), UNICODE_GLYPHS);
+assert.equal(resolveGlyphSet("ascii", wt), ASCII_GLYPHS);
+// An explicit unicode choice is clamped for widget content on legacy terminals
+assert.equal(resolveWidgetGlyphSet("unicode", mintty), ASCII_GLYPHS);
+assert.equal(resolveWidgetGlyphSet("unicode", wt), UNICODE_GLYPHS);
+assert.equal(resolveWidgetGlyphSet("auto", mintty), ASCII_GLYPHS);
+assert.equal(resolveWidgetGlyphSet("ascii", wt), ASCII_GLYPHS);
+
+// ASCII mode emits no non-ASCII codepoints at all
+const asciiLine = buildSessionLine({ requests: 7, spendHc: 1.24 }, ASCII_GLYPHS)!;
+assert.equal(asciiLine, "* 1.24 hc - 7 req");
+const asciiTiers = buildAccountTiers(acc({ balance: 10, authDaysLeft: 29 }), true, ASCII_GLYPHS);
+assert.ok(asciiTiers[0].startsWith("! + 10 hc"), `got ${asciiTiers[0]}`);
+assert.ok(asciiTiers[0].endsWith("~ 29d"), `got ${asciiTiers[0]}`);
+const asciiWidget = new StatusLineWidget(fakeTheme, asciiLine, asciiTiers, true, ASCII_GLYPHS).render(60)[0];
+assert.equal([...stripAnsi(asciiWidget)].every((c) => c.charCodeAt(0) < 128), true);
+
+// Sidebar glyph rows honor the caller's glyph set; structural rows (the
+// divider rule, meter cells) are panel furniture outside the glyph set.
+const asciiSidebar = buildSidebarRows({ requests: 7, spendHc: 1.24 }, acc({ balance: 249, authDaysLeft: 29 }), false, ASCII_GLYPHS);
+assert.ok(asciiSidebar.includes(SIDEBAR_DIVIDER_ROW), "the structural divider is glyph-independent");
+assert.ok(asciiSidebar.some((r) => r.text.startsWith("* ")), `session row uses ASCII bolt, got ${JSON.stringify(asciiSidebar[0])}`);
+assert.ok(asciiSidebar.some((r) => r.text === "+ 249 hc"), `balance row uses ASCII gem, got ${JSON.stringify(asciiSidebar)}`);
+for (const row of asciiSidebar) {
+	if (row === SIDEBAR_DIVIDER_ROW) continue;
+	assert.equal([...row.text].every((c) => c.charCodeAt(0) < 128), true, `non-ASCII glyph row: ${row.text}`);
+}
+// meter cells stay structural under ASCII (outside the glyph set)
+const asciiMeters = buildAccountSidebarRows(acc({ balance: 249, rate }), false, ASCII_GLYPHS);
+assert.ok(asciiMeters.some((r) => r.text.includes("■")), "meter cells are structural, outside the glyph set");
+assert.ok(asciiMeters.some((r) => r.text.startsWith("+ 249 hc")), `balance row uses ASCII gem, got ${JSON.stringify(asciiMeters[0])}`);
+const asciiPanel = buildSidebarPanel(
+	{
+		compatible: true,
+		isProviderActive: true,
+		sessionMode: "sidebar" as const,
+		accountMode: "sidebar" as const,
+		sessionStats: { requests: 7, spendHc: 1.24 },
+		account: acc({ balance: 249 }),
+		lowBalance: false,
+	},
+	ASCII_GLYPHS,
+);
+assert.equal(asciiPanel.publish, true);
+for (const row of asciiPanel.rows) {
+	if (row === SIDEBAR_DIVIDER_ROW) continue;
+	assert.equal([...row.text].every((c) => c.charCodeAt(0) < 128), true, `non-ASCII glyph row: ${row.text}`);
+}
+
+// Unicode mode keeps the glyphs (regression guard for the default path)
+assert.ok(buildAccountTiers(acc({ balance: 10 }), true)[0].includes("\u26A0 \u25C6"));
+
+// Truncation takes the caller's ellipsis so ASCII mode stays ASCII
+assert.equal(truncateAnsi("abcdefghij", 5, "..."), "abcd...");
+assert.ok(truncateAnsi("abcdefghij", 5).endsWith("\u2026"));
+
+assert.equal(coerceStatusConfig({ glyphs: "bogus" }).glyphs, "auto");
+assert.equal(coerceStatusConfig({ glyphs: "ascii" }).glyphs, "ascii");
 console.log("status.smoke: all assertions passed");

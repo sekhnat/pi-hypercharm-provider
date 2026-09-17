@@ -97,7 +97,7 @@
     "name": "DeepSeek V4 Pro 0813",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": "none",
+      "off": null,
       "minimal": null,
       "low": "low",
       "medium": null,
@@ -111,10 +111,10 @@
     "cost": {
       "input": 1.437216,
       "output": 4.311648,
-      "cacheRead": 0.0479072,
+      "cacheRead": 0.047907,
       "cacheWrite": 0
     },
-    "contextWindow": 1048576,
+    "contextWindow": 1000000,
     "maxTokens": 262144,
     "compat": {
       "supportsStore": false,
@@ -133,8 +133,8 @@
       "low": "low",
       "medium": null,
       "high": "high",
-      "xhigh": "xhigh",
-      "max": null
+      "xhigh": null,
+      "max": "max"
     },
     "input": [
       "text",
@@ -146,8 +146,8 @@
       "cacheRead": 0.03,
       "cacheWrite": 0
     },
-    "contextWindow": 1048576,
-    "maxTokens": 26214,
+    "contextWindow": 1000000,
+    "maxTokens": 32768,
     "compat": {
       "supportsStore": false,
       "supportsReasoningEffort": true,
@@ -172,9 +172,9 @@
       "text"
     ],
     "cost": {
-      "input": 0.102,
-      "output": 0.356,
-      "cacheRead": 0.051,
+      "input": 0.098,
+      "output": 0.334,
+      "cacheRead": 0.049,
       "cacheWrite": 0
     },
     "contextWindow": 256000,
@@ -200,8 +200,7 @@
       "max": "max"
     },
     "input": [
-      "text",
-      "image"
+      "text"
     ],
     "cost": {
       "input": 1.52432,
@@ -209,8 +208,8 @@
       "cacheRead": 0.283088,
       "cacheWrite": 0
     },
-    "contextWindow": 1048576,
-    "maxTokens": 262144,
+    "contextWindow": 1000000,
+    "maxTokens": 128000,
     "compat": {
       "supportsStore": false,
       "supportsReasoningEffort": true,
@@ -238,7 +237,7 @@
     "cost": {
       "input": 0.16332,
       "output": 0.5444,
-      "cacheRead": 0.031575200000000005,
+      "cacheRead": 0.031575,
       "cacheWrite": 0
     },
     "contextWindow": 1048576,
@@ -246,68 +245,6 @@
     "compat": {
       "supportsStore": false,
       "supportsReasoningEffort": true,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "glm-5",
-    "name": "GLM-5",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.86,
-      "output": 2.752,
-      "cacheRead": 0.43,
-      "cacheWrite": 0
-    },
-    "contextWindow": 202752,
-    "maxTokens": 20275,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "glm-5.1",
-    "name": "GLM-5.1",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 1.318,
-      "output": 4.308,
-      "cacheRead": 0.659,
-      "cacheWrite": 0
-    },
-    "contextWindow": 202750,
-    "maxTokens": 3276,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
       "thinkingFormat": "deepseek",
       "maxTokensField": "max_tokens"
     }
@@ -360,9 +297,9 @@
       "text"
     ],
     "cost": {
-      "input": 0.168,
-      "output": 0.66,
-      "cacheRead": 0.084,
+      "input": 0.178,
+      "output": 0.68,
+      "cacheRead": 0.089,
       "cacheWrite": 0
     },
     "contextWindow": 128072,
@@ -438,81 +375,9 @@
     }
   },
   {
-    "id": "kimi-k2.5",
-    "name": "Kimi K2.5",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.5584,
-      "output": 2.935,
-      "cacheRead": 0.2792,
-      "cacheWrite": 0
-    },
-    "contextWindow": 262144,
-    "maxTokens": 26214,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "kimi-k2.6",
-    "name": "Kimi K2.6",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": null,
-      "minimal": null,
-      "low": "low",
-      "medium": "medium",
-      "high": "high",
-      "xhigh": null,
-      "max": null
-    },
-    "input": [
-      "text",
-      "image"
-    ],
-    "cost": {
-      "input": 1.03436,
-      "output": 4.3552,
-      "cacheRead": 0.174208,
-      "cacheWrite": 0
-    },
-    "contextWindow": 262000,
-    "maxTokens": 26214,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": true,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
     "id": "kimi-k2.7-code",
     "name": "Kimi K2.7 Code",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
+    "reasoning": false,
     "input": [
       "text",
       "image"
@@ -523,7 +388,7 @@
       "cacheRead": 0.206872,
       "cacheWrite": 0
     },
-    "contextWindow": 262000,
+    "contextWindow": 256000,
     "maxTokens": 16000,
     "compat": {
       "supportsStore": false,
@@ -565,68 +430,6 @@
     }
   },
   {
-    "id": "llama-3.3-70b-instruct",
-    "name": "Llama 3.3 70B Instruct",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.6066,
-      "output": 1.0386,
-      "cacheRead": 0.3033,
-      "cacheWrite": 0
-    },
-    "contextWindow": 128000,
-    "maxTokens": 12800,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "llama-4-maverick-17b-128e-instruct-fp8",
-    "name": "Llama 4 Maverick 17B 128E Instruct FP8",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "off",
-      "minimal": null,
-      "low": null,
-      "medium": null,
-      "high": null,
-      "xhigh": null,
-      "max": "max"
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.255,
-      "output": 0.8365,
-      "cacheRead": 0.1275,
-      "cacheWrite": 0
-    },
-    "contextWindow": 430000,
-    "maxTokens": 43000,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
     "id": "minimax-m2.7",
     "name": "MiniMax M2.7",
     "reasoning": false,
@@ -634,9 +437,9 @@
       "text"
     ],
     "cost": {
-      "input": 0.396,
-      "output": 1.464,
-      "cacheRead": 0.198,
+      "input": 0.484,
+      "output": 1.852,
+      "cacheRead": 0.242,
       "cacheWrite": 0
     },
     "contextWindow": 262100,
@@ -668,150 +471,11 @@
     "cost": {
       "input": 0.32664,
       "output": 1.30656,
-      "cacheRead": 0.0642392,
+      "cacheRead": 0.064239,
       "cacheWrite": 0
     },
     "contextWindow": 512000,
     "maxTokens": 512000,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": true,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "qwen3-coder-480b-a35b-instruct-int4-mixed-ar",
-    "name": "Qwen3 Coder 480B A35B Instruct INT4 Mixed AR",
-    "reasoning": false,
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.445,
-      "output": 2.145,
-      "cacheRead": 0.2225,
-      "cacheWrite": 0
-    },
-    "contextWindow": 106000,
-    "maxTokens": 10600,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "qwen3-next-80b-a3b-instruct",
-    "name": "Qwen3 Next 80B A3B Instruct",
-    "reasoning": false,
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 0.1175,
-      "output": 1.136,
-      "cacheRead": 0.05875,
-      "cacheWrite": 0
-    },
-    "contextWindow": 262144,
-    "maxTokens": 26214,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": false,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "qwen3.6-flash",
-    "name": "Qwen3.6-Flash",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "none",
-      "minimal": "minimal",
-      "low": "low",
-      "medium": "medium",
-      "high": "high",
-      "xhigh": null,
-      "max": null
-    },
-    "input": [
-      "text",
-      "image"
-    ],
-    "cost": {
-      "input": 1,
-      "output": 4,
-      "cacheRead": 0.1,
-      "cacheWrite": 1.25
-    },
-    "contextWindow": 1000000,
-    "maxTokens": 64000,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": true,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "qwen3.6-max",
-    "name": "Qwen3.6-Max",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "none",
-      "minimal": "minimal",
-      "low": "low",
-      "medium": "medium",
-      "high": "high",
-      "xhigh": null,
-      "max": null
-    },
-    "input": [
-      "text"
-    ],
-    "cost": {
-      "input": 2,
-      "output": 12,
-      "cacheRead": 0.2,
-      "cacheWrite": 2.5
-    },
-    "contextWindow": 256000,
-    "maxTokens": 64000,
-    "compat": {
-      "supportsStore": false,
-      "supportsReasoningEffort": true,
-      "thinkingFormat": "deepseek",
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
-    "id": "qwen3.6-plus",
-    "name": "Qwen3.6-Plus",
-    "reasoning": true,
-    "thinkingLevelMap": {
-      "off": "none",
-      "minimal": "minimal",
-      "low": "low",
-      "medium": "medium",
-      "high": "high",
-      "xhigh": null,
-      "max": null
-    },
-    "input": [
-      "text",
-      "image"
-    ],
-    "cost": {
-      "input": 2,
-      "output": 6,
-      "cacheRead": 0.2,
-      "cacheWrite": 2.5
-    },
-    "contextWindow": 1000000,
-    "maxTokens": 64000,
     "compat": {
       "supportsStore": false,
       "supportsReasoningEffort": true,

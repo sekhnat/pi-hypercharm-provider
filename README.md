@@ -31,23 +31,23 @@ _Hyperoptimized coding models — DeepSeek, GLM, Kimi, Qwen, MiniMax, Gemma, GPT
 | DeepSeek V4 Flash 0731 | Text | 1.0M | 384K | $0.44 | $1.32 |
 | DeepSeek V4 Pro | Text | 1.0M | 384K | $2.40 | $4.80 |
 | DeepSeek V4 Pro 0813 | Text | 1.0M | 262K | $1.44 | $4.31 |
-| DeepSeek V4.1 Flash | Text + Image | 1.0M | 26K | $0.30 | $1.20 |
-| Gemma 4 26B A4B | Text | 256K | 26K | $0.10 | $0.36 |
-| GLM 5.3 | Text + Image | 1.0M | 262K | $1.52 | $4.79 |
+| DeepSeek V4.1 Flash | Text + Image | 1.0M | 33K | $0.30 | $1.20 |
+| Gemma 4 26B A4B | Text | 256K | 26K | $0.10 | $0.33 |
+| GLM 5.3 | Text | 1.0M | 128K | $1.52 | $4.79 |
 | GLM 5.3 Flash | Text + Image | 1.0M | 131K | $0.16 | $0.54 |
 | GLM-5 | Text | 203K | 20K | $0.86 | $2.75 |
-| GLM-5.1 | Text | 203K | 3K | $1.32 | $4.31 |
+| GLM-5.1 | Text | 203K | 3K | $1.36 | $4.27 |
 | GLM-5.2 | Text | 1.0M | 33K | $1.52 | $4.79 |
-| gpt-oss-120b | Text | 128K | 13K | $0.17 | $0.66 |
+| gpt-oss-120b | Text | 128K | 13K | $0.18 | $0.68 |
 | Inkling | Text + Image | 1.0M | 33K | $1.09 | $4.41 |
 | Kimi K2 Thinking | Text | 262K | 26K | $0.60 | $2.50 |
 | Kimi K2.5 | Text | 262K | 26K | $0.56 | $2.94 |
 | Kimi K2.6 | Text + Image | 262K | 26K | $1.03 | $4.36 |
-| Kimi K2.7 Code | Text + Image | 262K | 16K | $1.03 | $4.36 |
+| Kimi K2.7 Code | Text + Image | 256K | 16K | $1.03 | $4.36 |
 | Kimi K3 | Text + Image | 1.0M | 16K | $3.27 | $16.33 |
 | Llama 3.3 70B Instruct | Text | 128K | 13K | $0.61 | $1.04 |
-| Llama 4 Maverick 17B 128E Instruct FP8 | Text | 430K | 43K | $0.26 | $0.84 |
-| MiniMax M2.7 | Text | 262K | 7K | $0.40 | $1.46 |
+| Llama 4 Maverick 17B 128E Instruct FP8 | Text | 430K | 43K | $0.25 | $0.83 |
+| MiniMax M2.7 | Text | 262K | 7K | $0.48 | $1.85 |
 | MiniMax M3 | Text + Image | 512K | 512K | $0.33 | $1.31 |
 | Qwen3 Coder 480B A35B Instruct INT4 Mixed AR | Text | 106K | 11K | $0.45 | $2.15 |
 | Qwen3 Next 80B A3B Instruct | Text | 262K | 26K | $0.12 | $1.14 |
@@ -168,6 +168,7 @@ Edit `~/.pi/agent/extensions/hypercharm.json` or run `/hypercharm-status`:
 | `account` | `sidebar` \| `widget` \| `statusbar` \| `off` | `sidebar` |
 | `hideOnOtherProvider` | `true` \| `false` | `true` |
 | `lowBalanceHc` | number \| `null` | `25` |
+| `glyphs` | `auto` \| `unicode` \| `ascii` | `auto` |
 
 The `sidebar` mode publishes a structured panel (`HyperCharm`) to the
 [Pi Atelier](https://github.com/michaelmjhhhh/pi-atelier) sidebar — visible by
@@ -185,9 +186,19 @@ Non-interactive toggles:
 /hypercharm-status account sidebar|widget|statusbar|off
 /hypercharm-status hide true|false
 /hypercharm-status lowBalance 50|off
+/hypercharm-status glyphs auto|unicode|ascii
 /hypercharm-status refresh
 /hypercharm-status reset
 ```
+
+`glyphs: "auto"` replaces the footer glyphs (bolt, gem, warning, auth arrow,
+separator) with ASCII equivalents on legacy terminals (mintty/Cygwin), whose
+cell-width tables disagree with the extension's width math. There a
+full-width widget line can wrap physically, which desynchronizes pi's
+renderer and leaves stale rows behind. The widget also never paints the
+terminal's last column, and clamps an explicit `unicode` choice to ASCII on
+legacy terminals; the statusbar is not edge-padded and always honors the
+exact choice.
 
 
 ## Authentication
