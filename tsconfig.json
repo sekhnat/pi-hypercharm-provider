@@ -12,6 +12,12 @@
     "noEmit": true,
     "resolveJsonModule": true
   },
+  // Upstream-derived node:test suites run through jiti (npm test) and are not
+  // held to the fork's stricter tsc; upstream typechecks tests with strict:false.
   "include": ["./*.ts", "tests/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "tests/notify.test.ts",
+    "tests/provider.integration.test.ts"
+  ]
 }

@@ -21,6 +21,9 @@ When a model needs overrides, new properties, or corrections, edit the appropria
 | `index.ts` | Provider extension code: model sync, streaming wrapper, footer-status wiring. |
 | `status.ts` | Footer-status presentation: config schema, hypercredit/rate-limit formatters, progressive-disclosure tiers, width-aware widget. Pure module — no pi imports; exercised by `tests/status.smoke.ts`. |
 | `scripts/update-models.js` | The sync script itself (edit only if changing how models are fetched/transformed). |
+| `identity.ts` | Every identifier this extension registers into a shared pi surface (provider id, custom api name, status/widget keys, command, prism entry type, auth key + env var, config/cache file names). `tests/identity.test.ts` enforces namespacing, uniqueness, and disjointness from the official `@charmland/pi-hyper-provider` — never hardcode one of these elsewhere. |
+| `notify.ts` | Deduplicated warning sink: fetch/parse failures go to the session UI once one is active, stderr before that, never thrown. |
+| `prism.ts` | Hyper routing-header validation (sanitizer + persisted-entry re-validation). Pure module — no pi imports; exercised by `tests/prism.test.ts`. |
 
 ## Data Flow
 
@@ -53,6 +56,27 @@ Provider API  ──fetch──►  models.json  ──apply──►  patch.jso
 
 ## TL;DR
 
+- **Never register into a shared pi surface with a hardcoded name** — add it to `identity.ts`; the co-installation tests enforce the namespace.
 - **Never edit `models.json`** — edit `patch.json` instead.
 - **Never edit the README model table** — run the update script instead.
 - `patch.json` and `custom-models.json` are the source files you should modify.
+
+## Tests
+
+`npm run check` runs `tsc --noEmit`, the dependency-free status smoke test, and
+the node:test suites (through `jiti/register` so the extension's extensionless
+TS imports resolve). `npm test` runs only the test suites.
+
+| File | Scope |
+|------|-------|
+| `tests/status.smoke.ts` | Footer widget layout, width math, tier building, config coercion |
+| `tests/identity.test.ts` | Co-install invariant: namespaced + unique + disjoint from the official provider's reserved names |
+| `tests/prism.test.ts` | Prism header/label sanitization and persisted-entry validation |
+| `tests/notify.test.ts` | Warning dedupe, UI routing, stale-ctx stderr fallback |
+| `tests/provider.integration.test.ts` | Real pi runtime (DefaultResourceLoader + createAgentSession + ExtensionRunner): embedded catalog, catalog hot-swap/cache/retention, deprecated grace window, warning surfacing, prism entry durability, and co-installation against `tests/fixtures/official-surface.ts` |
+
+The integration suite stubs `globalThis.fetch` and emits the session lifecycle
+events the pi CLI emits (`session_start`, `turn_start`, `after_provider_response`,
+`message_end`, `turn_end`). It must be run with jiti; `--import jiti/register`
+is already wired into `npm test`.
+

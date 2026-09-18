@@ -110,7 +110,24 @@
 import { clampThinkingLevel, streamOpenAICompletions } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { USER_AGENT, loginHypercharm, refreshHypercharmToken } from "./oauth";
+import {
+	API_KEY_ENV,
+	API_KEY_PLACEHOLDER,
+	API_NAME,
+	CACHE_FILE_NAME,
+	CONFIG_FILE_NAME,
+	PRISM_ENTRY_TYPE,
+	PROVIDER_DISPLAY_NAME,
+	PROVIDER_ID,
+	STATUS_COMMAND,
+	STATUS_KEY_ACCOUNT,
+	STATUS_KEY_SESSION,
+	WIDGET_KEY,
+} from "./identity";
+import { createNotifier } from "./notify";
+import { prismRouteFromHeaders, prismRouteLabel, readPrismRoute, type PrismRoute } from "./prism";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import modelsData from "./models.json" with { type: "json" };
 import customModelsData from "./custom-models.json" with { type: "json" };
@@ -152,13 +169,26 @@ import fs from "fs";
 import { hostname } from "os";
 import path from "path";
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+// Warning sink for fetch/parse failures: deduplicated, routed to the session UI
+// once one is active, stderr before that. Warnings must never throw.
+const notifier = createNotifier();
+
+function describeError(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+function warnAccountFetch(label: string, reason: string): void {
+	notifier.warn(`Unable to refresh HyperCharm ${label}: ${reason}.`);
+}
+
 // ─── Stale-While-Revalidate Model Sync ────────────────────────────────────────
 
-const PROVIDER_ID = "hypercharm";
 const BASE_URL = "https://hyper.charm.land/v1";
 const MODELS_URL = `${BASE_URL}/provider`;
 const CACHE_DIR = path.join(getAgentDir(), "cache");
-const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
+const CACHE_PATH = path.join(CACHE_DIR, CACHE_FILE_NAME);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
 const EMBEDDED_HASH = embeddedCatalogHash(modelsData as JsonModel[]);
 const VERSION = (pkg as { version?: string }).version ?? "0.0.0";
@@ -169,20 +199,37 @@ async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<Js
 			headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": USER_AGENT },
 			signal: signal ? AbortSignal.any([AbortSignal.timeout(LIVE_FETCH_TIMEOUT_MS), signal]) : AbortSignal.timeout(LIVE_FETCH_TIMEOUT_MS),
 		});
-		if (!response.ok) return null;
+		if (!response.ok) {
+			notifier.warn(`HyperCharm model catalog refresh failed: HTTP ${response.status} — serving cached/embedded models.`);
+			return null;
+		}
 		const data = await response.json();
 		const apiModels = Array.isArray(data) ? data : (data.models || data.data || []);
-		if (!Array.isArray(apiModels) || apiModels.length === 0) return null;
+		if (!Array.isArray(apiModels) || apiModels.length === 0) {
+			notifier.warn("HyperCharm model catalog refresh returned no usable models — serving cached/embedded models.");
+			return null;
+		}
 		return apiModels.map(transformApiModel).filter((m): m is JsonModel => m !== null);
-	} catch {
+	} catch (err) {
+		// An aborted signal means the session was replaced, not that Hyper failed.
+		if (!signal?.aborted) {
+			notifier.warn(`HyperCharm model catalog refresh failed: ${describeError(err)} — serving cached/embedded models.`);
+		}
 		return null;
 	}
 }
 
 function loadCachedModels(): ModelsCache | null {
 	try {
-		return parseModelsCache(JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")));
-	} catch {
+		const parsed = parseModelsCache(JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")));
+		if (parsed === null) {
+			notifier.warn(`Ignoring malformed HyperCharm model cache at ${CACHE_PATH}.`);
+		}
+		return parsed;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+			notifier.warn(`Ignoring unreadable HyperCharm model cache at ${CACHE_PATH}: ${describeError(err)}.`);
+		}
 		return null;
 	}
 }
@@ -192,8 +239,9 @@ function cacheModels(models: JsonModel[]): void {
 		fs.mkdirSync(CACHE_DIR, { recursive: true });
 		const envelope = { version: VERSION, embeddedHash: EMBEDDED_HASH, models };
 		fs.writeFileSync(CACHE_PATH, JSON.stringify(envelope, null, 2) + "\n");
-	} catch {
-		// Cache write failure is non-fatal
+	} catch (err) {
+		// Non-fatal: the freshly fetched catalog still serves this session.
+		notifier.warn(`Could not write the HyperCharm model cache to ${CACHE_PATH}: ${describeError(err)}.`);
 	}
 }
 
@@ -229,7 +277,7 @@ async function resolveApiKey(modelRegistry: ModelRegistry): Promise<void> {
 
 // ─── Status Display Configuration ──────────────────────────────────────────────
 
-const CONFIG_PATH = path.join(getAgentDir(), "extensions", "hypercharm.json");
+const CONFIG_PATH = path.join(getAgentDir(), "extensions", CONFIG_FILE_NAME);
 
 let statusConfig: StatusConfig = { ...DEFAULT_STATUS_CONFIG };
 
@@ -237,8 +285,11 @@ function loadStatusConfig(): StatusConfig {
 	try {
 		const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 		statusConfig = coerceStatusConfig(raw);
-	} catch {
-		// Missing or unreadable file → defaults
+	} catch (err) {
+		// A missing file is normal; anything else is worth surfacing once.
+		if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+			notifier.warn(`Ignoring unreadable HyperCharm status config at ${CONFIG_PATH}: ${describeError(err)} — using defaults.`);
+		}
 	}
 	return statusConfig;
 }
@@ -259,8 +310,9 @@ function writeStatusConfig(): void {
 		raw.glyphs = statusConfig.glyphs;
 		fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
 		fs.writeFileSync(CONFIG_PATH, JSON.stringify(raw, null, 2) + "\n");
-	} catch {
-		// Config write failure is non-fatal — the in-memory config still applies
+	} catch (err) {
+		// Non-fatal: the in-memory config still applies to this session.
+		notifier.warn(`Could not save the HyperCharm status config to ${CONFIG_PATH}: ${describeError(err)}.`);
 	}
 }
 
@@ -390,7 +442,7 @@ function streamHypercharm(
 	if (!apiKey) {
 		throw new Error(
 			`No API key for HyperCharm. Add it to ~/.pi/agent/auth.json, ` +
-			`set HYPERCHARM_API_KEY env var, or use --api-key.`,
+			`set ${API_KEY_ENV} env var, or use --api-key.`,
 		);
 	}
 
@@ -447,7 +499,7 @@ let metaFetched = false;
 
 type FetchJsonResult = { ok: true; value: any } | { ok: false };
 
-async function fetchJsonGet(url: string, apiKey: string, signal?: AbortSignal): Promise<FetchJsonResult> {
+async function fetchJsonGet(url: string, apiKey: string, signal: AbortSignal | undefined, label: string): Promise<FetchJsonResult> {
 	try {
 		const response = await fetch(url, {
 			headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": USER_AGENT },
@@ -455,9 +507,14 @@ async function fetchJsonGet(url: string, apiKey: string, signal?: AbortSignal): 
 				? AbortSignal.any([AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS), signal])
 				: AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS),
 		});
-		if (!response.ok) return { ok: false };
+		if (!response.ok) {
+			warnAccountFetch(label, `HTTP ${response.status}`);
+			return { ok: false };
+		}
 		return { ok: true, value: await response.json() };
-	} catch {
+	} catch (err) {
+		// An abort means the session was replaced or shut down, not a failure.
+		if (!signal?.aborted) warnAccountFetch(label, describeError(err));
 		return { ok: false };
 	}
 }
@@ -470,7 +527,7 @@ function refreshCredits(apiKey: string | undefined, signal: AbortSignal | undefi
 	if (creditsInFlight) return creditsInFlight;
 	creditsInFlight = (async () => {
 		try {
-			const result = await fetchJsonGet(`${BASE_URL}/credits`, apiKey, signal);
+			const result = await fetchJsonGet(`${BASE_URL}/credits`, apiKey, signal, "Hypercredit balance");
 			if (!result.ok) return;
 			const data = result.value;
 			// /credits can report hypercredits ("balance") or USD ("balance_usd",
@@ -488,12 +545,11 @@ function refreshCredits(apiKey: string | undefined, signal: AbortSignal | undefi
 }
 
 /** Team name (/v1/teams) + OAuth device-session expiry (/v1/devices). */
-/** Team name (/v1/teams) + OAuth device-session expiry (/v1/devices). */
 async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSignal): Promise<void> {
 	if (!apiKey || metaFetched) return;
 	const [teams, devices] = await Promise.all([
-		fetchJsonGet(`${BASE_URL}/teams`, apiKey, signal),
-		fetchJsonGet(`${BASE_URL}/devices`, apiKey, signal),
+		fetchJsonGet(`${BASE_URL}/teams`, apiKey, signal, "team metadata"),
+		fetchJsonGet(`${BASE_URL}/devices`, apiKey, signal, "device sessions"),
 	]);
 	if (signal?.aborted) return;
 
@@ -523,9 +579,6 @@ async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSign
 
 // ─── Status Rendering ─────────────────────────────────────────────────────────
 
-const WIDGET_KEY = "hypercharm";
-const STATUS_KEY_SESSION = "hypercharm-session";
-const STATUS_KEY_ACCOUNT = "hypercharm-account";
 
 // Sidebar panel publisher. The event bus arrives at factory time
 // (initSidebarPublisher) because renderStatus runs before and outside session
@@ -730,7 +783,7 @@ function statusSummary(): string {
 }
 
 const STATUS_USAGE =
-	"Usage: /hypercharm-status [session|account sidebar|widget|statusbar|off · hide true|false · lowBalance <hc>|off · glyphs auto|unicode|ascii · refresh · reset]";
+	`Usage: /${STATUS_COMMAND} [session|account sidebar|widget|statusbar|off · hide true|false · lowBalance <hc>|off · glyphs auto|unicode|ascii · refresh · reset]`;
 
 async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise<void> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -919,15 +972,15 @@ let currentModels: JsonModel[] = [];
 function makeProviderConfig(models: JsonModel[] = currentModels) {
 	return {
 		baseUrl: BASE_URL,
-		apiKey: "$HYPERCHARM_API_KEY",
+		apiKey: API_KEY_PLACEHOLDER,
 		// Custom API name so our streamSimple registers as its own handler and
 		// never shadows pi's built-in openai-completions pipeline for other
 		// providers. streamHypercharm delegates to pi-ai's OpenAI-compat streamer.
-		api: "hypercharm",
+		api: API_NAME,
 		models,
 		streamSimple: streamHypercharm,
 		oauth: {
-			name: "HyperCharm",
+			name: PROVIDER_DISPLAY_NAME,
 			login: (callbacks: OAuthLoginCallbacks) => loginHypercharm(callbacks),
 			refreshToken: (credentials: OAuthCredentials, signal?: AbortSignal) => refreshHypercharmToken(credentials, signal),
 			getApiKey: (credentials: OAuthCredentials) => String(credentials.access ?? ""),
@@ -941,6 +994,10 @@ export default function (pi: ExtensionAPI) {
 	const patches = patchData as PatchData;
 	const deprecated = deprecatedData as DeprecatedData;
 
+	// Prism routing state: collected per assistant request, committed at turn_end.
+	let collectingPrismRoute = false;
+	let prismRoute: PrismRoute | undefined;
+
 	const staleBase = loadStaleModels(embeddedModels, deprecated);
 	const staleModels = buildModels(staleBase, customModels, patches, deprecated);
 	currentModels = staleModels;
@@ -952,7 +1009,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerProvider(PROVIDER_ID, makeProviderConfig(staleModels));
 
-	pi.registerCommand("hypercharm-status", {
+	pi.registerCommand(STATUS_COMMAND, {
 		description: "Configure the HyperCharm footer status (session spend, balance, rate limits)",
 		handler: async (args, ctx) => {
 			await handleStatusCommand(args, ctx);
@@ -960,6 +1017,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		notifier.activate(ctx);
 		const epoch = ++statusEpoch;
 		revalidateAbort?.abort();
 		revalidateAbort = new AbortController();
@@ -975,7 +1033,14 @@ export default function (pi: ExtensionAPI) {
 		// over anything that touched provider registration during load.
 		pi.registerProvider(PROVIDER_ID, makeProviderConfig());
 
-		resolveApiKey(ctx.modelRegistry).then(() => {
+		// A failure here used to vanish: no key resolved meant no refresh and no
+		// diagnostics. Surface it, then continue — without a key we serve the
+		// embedded/cached catalog.
+		resolveApiKey(ctx.modelRegistry)
+			.catch((err) => {
+				notifier.warn(`Unable to resolve HyperCharm credentials: ${describeError(err)} — serving cached/embedded models.`);
+			})
+			.then(() => {
 			// A session replacement while the key resolved invalidated the
 			// captured ctx (fast-resume, /new, /fork); nothing below may touch it.
 			if (epoch !== statusEpoch) return;
@@ -1036,4 +1101,42 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		publisher().withdraw();
 	});
+
+	// Prism routing: Hyper's edge reports which upstream model actually served the
+	// assistant request via response headers. Collection is scoped to that request
+	// so auxiliary calls between turns cannot leak a route into the transcript,
+	// and the route lands at turn_end as a durable session entry — never a
+	// notification — so it survives reopening the session.
+	pi.registerEntryRenderer(PRISM_ENTRY_TYPE, (entry, _options, theme) => {
+		const route = readPrismRoute(entry.data);
+		const label = route ? prismRouteLabel(route) : undefined;
+		if (label === undefined) return undefined;
+		return new Text(`${theme.fg("muted", "Prism")} ${theme.fg("dim", "→")} ${theme.fg("muted", label)}`, 0, 0);
+	});
+
+	pi.on("turn_start", () => {
+		collectingPrismRoute = true;
+		prismRoute = undefined;
+	});
+
+	pi.on("after_provider_response", (event) => {
+		if (!collectingPrismRoute) return;
+		prismRoute = prismRouteFromHeaders(event.headers);
+	});
+
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant") collectingPrismRoute = false;
+	});
+
+	pi.on("turn_end", (event) => {
+		const route = prismRoute;
+		prismRoute = undefined;
+		collectingPrismRoute = false;
+		if (route === undefined) return;
+		if (event.message.role !== "assistant") return;
+		if (event.message.provider !== PROVIDER_ID) return;
+		if (event.message.stopReason === "error" || event.message.stopReason === "aborted") return;
+		pi.appendEntry(PRISM_ENTRY_TYPE, route);
+	});
+
 }

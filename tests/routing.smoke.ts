@@ -97,6 +97,11 @@ function makeHarness(provider = "hypercharm"): Harness {
 		registerCommand: (name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
 			commands.set(name, spec.handler);
 		},
+		// Upstream v1.3.28 factory surface: the extension registers a Prism entry
+		// renderer at load and may append durable entries; stub them harmlessly.
+		registerEntryRenderer: (_type: string, _renderer: unknown) => undefined,
+		appendEntry: (_type: string, _data: unknown) => undefined,
+
 		registerShortcut: () => undefined,
 		registerTool: () => undefined,
 		getAllTools: () => [],

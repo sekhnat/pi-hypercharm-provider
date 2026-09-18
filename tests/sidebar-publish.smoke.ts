@@ -54,6 +54,11 @@ function makeRuntime(modelProvider: string | undefined, apiKey: string | undefin
 		registerCommand: (_name: string, command: { handler: CommandHandler }) => {
 			commandHandlers.push(command.handler);
 		},
+		// Upstream v1.3.28 factory surface: the extension registers a Prism entry
+		// renderer at load and may append durable entries; stub them harmlessly.
+		registerEntryRenderer: (_type: string, _renderer: unknown) => undefined,
+		appendEntry: (_type: string, _data: unknown) => undefined,
+
 		on: (event: string, handler: (event: unknown, ctx: unknown) => void | Promise<void>) => {
 			const list = handlers.get(event) ?? [];
 			list.push(handler);
