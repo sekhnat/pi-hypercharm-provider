@@ -156,7 +156,10 @@ the Hypercredit balance (`/v1/credits`), the per-hour and per-day request
 rate limits captured from response headers, and days until the OAuth device
 session expires when signed in with OAuth. The right side compresses
 progressively as the terminal narrows, and turns to a warning color at/below
-the `lowBalanceHc` threshold.
+the `lowBalanceHc` threshold. The device-session expiry readout is optional:
+`/hypercharm-status authexpiry true` (or the interactive menu's "Hide auth
+expiry" toggle) omits it from the sidebar panel and the widget/statusbar
+account line while the rest of the account line stays intact.
 
 ### Configuration
 
@@ -167,6 +170,7 @@ Edit `~/.pi/agent/extensions/hypercharm.json` or run `/hypercharm-status`:
 | `session` | `sidebar` \| `widget` \| `statusbar` \| `off` | `sidebar` |
 | `account` | `sidebar` \| `widget` \| `statusbar` \| `off` | `sidebar` |
 | `hideOnOtherProvider` | `true` \| `false` | `true` |
+| `hideAuthExpiry` | `true` \| `false` | `false` |
 | `lowBalanceHc` | number \| `null` | `25` |
 | `glyphs` | `auto` \| `unicode` \| `ascii` | `auto` |
 
@@ -185,6 +189,7 @@ Non-interactive toggles:
 /hypercharm-status session sidebar|widget|statusbar|off
 /hypercharm-status account sidebar|widget|statusbar|off
 /hypercharm-status hide true|false
+/hypercharm-status authexpiry true|false
 /hypercharm-status lowBalance 50|off
 /hypercharm-status glyphs auto|unicode|ascii
 /hypercharm-status refresh

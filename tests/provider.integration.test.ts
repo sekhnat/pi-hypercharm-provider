@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ delete process.env.HYPERCHARM_API_KEY;
 
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const officialSurfacePath = fileURLToPath(new URL("./fixtures/official-surface.ts", import.meta.url));
+const atelierHostPath = fileURLToPath(new URL("./fixtures/atelier-host.ts", import.meta.url));
 const deprecatedModelsPath = fileURLToPath(new URL("../deprecated-models.json", import.meta.url));
 const embeddedModelsPath = fileURLToPath(new URL("../models.json", import.meta.url));
 
@@ -417,5 +418,155 @@ test("co-installs with the official identifier surface without interference", as
 		assert.equal(ui.statusKeys.includes("hyper") && ownKeys.includes("hyper"), false);
 	} finally {
 		harness.session.dispose();
+	}
+});
+
+test("status command: authexpiry hides the device-session expiry atom end to end", async () => {
+	// 29.5 days out: Math.ceil lands on exactly 30, stable for the whole probe.
+	const expiresAt = new Date(Date.now() + 29.5 * 86_400_000).toISOString();
+	let devicesFetches = 0;
+	const hyperFetch = async (input) => {
+		const url = String(input);
+		const json = (payload) => new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+		if (url === CATALOG_URL) return json({ models: [FIXTURE_MODEL] });
+		if (url.includes("/v1/credits")) return json({ balance: 249 });
+		if (url.includes("/v1/teams")) return json({ items: [{ name: "Probe Team" }] });
+		if (url.includes("/v1/devices")) {
+			devicesFetches += 1;
+			return json({ items: [{ name: "Pi (" + hostname() + ")", expires_at: expiresAt }] });
+		}
+		throw new Error("unexpected fetch in probe: " + url);
+	};
+
+	// The fake Atelier host makes the sidebar panel publish; account rows land
+	// from the session-start prefetch with no turn activity needed.
+	const harness = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath] });
+	try {
+		const notifications = [];
+		const ui: any = {
+			...harness.runner.createContext().ui,
+			theme: { fg: (_c, t) => t },
+			notify: (message) => notifications.push(String(message)),
+			setStatus: () => undefined,
+			setWidget: () => undefined,
+			select: async () => undefined,
+		};
+		harness.runner.setUIContext(ui, "tui");
+		// hasUI is getter-only on the real command context; the status handler
+		// only reads ctx.ui + ctx.hasUI, so a minimal literal satisfies it.
+		const ctx: any = { hasUI: true, ui };
+		const command = harness.runner.getCommand("hypercharm-status");
+		assert.ok(command, "hypercharm-status command registered");
+		const handler = command.handler;
+		const configPath = path.join(agentDir, "extensions", "hypercharm.json");
+		const readConfig = () => {
+			try {
+				return JSON.parse(readFileSync(configPath, "utf8"));
+			} catch {
+				return {};
+			}
+		};
+		const busEvents: any[] = (globalThis as any).__atelierHostBusEvents ?? [];
+		const registerRows = () => {
+			const registers = busEvents.filter((event) => event.type === "register" && event.panel?.id === "hypercharm:usage");
+			const last = registers.at(-1);
+			return last ? last.panel.rows.map((row) => (typeof row === "string" ? row : row.text)) : [];
+		};
+
+		// Announce the host after both factories ran (the publisher only listens
+		// for discovery — an earlier announce would be lost). Selecting a
+		// HyperCharm model is the real prefetch trigger: the model_select handler
+		// re-renders and fetches credits + device metadata, so re-emit until the
+		// panel carries the populated account.
+		(globalThis as any).__atelierHostDiscover?.();
+		// The session's selected model drives renderStatus's provider gate
+		// (hideOnOtherProvider); select the HyperCharm fixture model for real.
+		// The catalog hot-swap is async, so wait for the model to land.
+		const fixtureModel = await waitFor("fixture model registered", () =>
+			harness.runtime.getModel("hypercharm", "fixture-model"),
+		);
+		await harness.session.setModel(fixtureModel);
+		const modelSelect = () => harness.runner.emit({ type: "model_select", model: { provider: "hypercharm", id: "fixture-model", name: "Fixture model" } } as any);
+		await modelSelect();
+		await waitFor("expiry row published", () => {
+			void modelSelect();
+			return registerRows().some((text) => text.includes("expires 30d")) ? true : undefined;
+		});
+		assert.ok(registerRows().some((text) => text.includes("◆ 249 hc")), "balance row present: " + JSON.stringify(registerRows()));
+		// Baseline after the startup prefetch settles (early model_select emits
+		// can race refreshAccountMeta before its latch; that is pre-existing).
+		const devicesFetchesAtBaseline = devicesFetches;
+
+		// authexpiry true: the expiry row vanishes from the published panel, the
+		// choice persists, and the command summary reports it.
+		await handler("authexpiry true", ctx);
+		assert.match(notifications.at(-1), /hideAuthExpiry=true/);
+		assert.equal(readConfig().hideAuthExpiry, true);
+		await waitFor("expiry row hidden", () => (registerRows().length > 0 && !registerRows().some((text) => text.includes("expires")) ? true : undefined));
+		assert.ok(registerRows().some((text) => text.includes("◆ 249 hc")), "other atoms survive the hide: " + JSON.stringify(registerRows()));
+
+		// Invalid value: usage text, nothing changes.
+		await handler("authexpiry maybe", ctx);
+		assert.match(notifications.at(-1), /Usage:/);
+		assert.equal(readConfig().hideAuthExpiry, true);
+
+		// Re-enable: the current days return without re-auth or a manual refresh
+		// (still the /v1/devices session fetched at startup).
+		await handler("authexpiry false", ctx);
+		assert.equal(readConfig().hideAuthExpiry, false);
+		await waitFor("expiry row restored", () => (registerRows().some((text) => text.includes("expires 30d")) ? true : undefined));
+		assert.equal(devicesFetches, devicesFetchesAtBaseline, "re-enabling must not refetch device sessions");
+
+		// Interactive menu: the toggle flips, persists, and re-renders.
+		let picked;
+		const picks = [
+			(items) => {
+				picked = items.find((item) => item.startsWith("Hide auth expiry"));
+				return picked;
+			},
+			() => undefined,
+		];
+		ui.select = async (_title, items) => (picks.length ? picks.shift()(items) : undefined);
+		await handler("", ctx);
+		assert.match(picked, /^Hide auth expiry: off$/);
+		assert.equal(readConfig().hideAuthExpiry, true);
+
+		// Restart: dispose this session, then a fresh session re-loads the
+		// persisted choice from hypercharm.json and publishes its panel without
+		// the expiry row.
+		const busMark = ((globalThis as any).__atelierHostBusEvents as any[]).length;
+		await harness.session.dispose();
+		const restarted = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath] });
+		try {
+			// The re-run fixture factory rebinds the discover trigger to the new
+			// loader's bus; the restarted publisher needs its own announce.
+			(globalThis as any).__atelierHostDiscover?.();
+			const restartedModel = await waitFor("restarted fixture model", () =>
+				restarted.runtime.getModel("hypercharm", "fixture-model"),
+			);
+			await restarted.session.setModel(restartedModel);
+			void restarted.runner.emit({ type: "model_select", model: { provider: "hypercharm", id: "fixture-model" } } as any);
+			await waitFor("restart keeps it hidden", () => {
+				const rows = ((globalThis as any).__atelierHostBusEvents as any[])
+					.slice(busMark)
+					.filter((event) => event.type === "register" && event.panel?.id === "hypercharm:usage")
+					.at(-1)?.panel?.rows?.map((row) => (typeof row === "string" ? row : row.text)) ?? [];
+				return rows.length > 0 && !rows.some((text) => text.includes("expires")) ? true : undefined;
+			});
+
+			// Reset restores the default (driven from the restarted session).
+			const restartedCommand = restarted.runner.getCommand("hypercharm-status");
+			assert.ok(restartedCommand, "restarted hypercharm-status registered");
+			await restartedCommand.handler("reset", { hasUI: true, ui } as any);
+			assert.equal(readConfig().hideAuthExpiry, false);
+		} finally {
+			restarted.session.dispose();
+		}
+	} finally {
+		try {
+			harness.session.dispose();
+		} catch {
+			// Already disposed before the restart phase.
+		}
 	}
 });

@@ -80,6 +80,8 @@ export interface StatusConfig {
 	account: DisplayMode;
 	/** Hide everything when the active model is not from this provider. */
 	hideOnOtherProvider: boolean;
+	/** Omit the OAuth device-session expiry atom ("expires Nd" / "⟳ Nd") from every status surface. */
+	hideAuthExpiry: boolean;
 	/** Warn (warn glyph + highlight) when balance drops to this many hc. null = never. */
 	lowBalanceHc: number | null;
 	/** Footer glyph set; auto degrades to ASCII on legacy terminals. */
@@ -90,6 +92,7 @@ export const DEFAULT_STATUS_CONFIG: StatusConfig = {
 	session: "sidebar",
 	account: "sidebar",
 	hideOnOtherProvider: true,
+	hideAuthExpiry: false,
 	lowBalanceHc: 25,
 	glyphs: "auto",
 };
@@ -114,6 +117,7 @@ export function coerceStatusConfig(raw: unknown): StatusConfig {
 		session: coerceMode(r.session, d.session),
 		account: coerceMode(r.account, d.account),
 		hideOnOtherProvider: typeof r.hideOnOtherProvider === "boolean" ? r.hideOnOtherProvider : d.hideOnOtherProvider,
+		hideAuthExpiry: typeof r.hideAuthExpiry === "boolean" ? r.hideAuthExpiry : d.hideAuthExpiry,
 		lowBalanceHc:
 			typeof r.lowBalanceHc === "number" && Number.isFinite(r.lowBalanceHc) && r.lowBalanceHc > 0
 				? r.lowBalanceHc
@@ -215,18 +219,29 @@ export function accountHasData(acc: AccountState): boolean {
 	return acc.balance !== null || acc.teamName !== null || acc.rate !== null;
 }
 
+/** Optional render knobs threaded from the status config into the account builders. */
+export interface AccountRenderOptions {
+	/** Omit the OAuth device-session expiry atom from the rendered account. */
+	hideAuthExpiry?: boolean;
+}
+
 /**
  * Right side as progressive tiers — entries share no summary separator;
  * atoms are joined with " · ". Render picks the first that fits.
  */
-export function buildAccountTiers(acc: AccountState, lowBalance: boolean, glyphs: GlyphSet = UNICODE_GLYPHS): string[] {
+export function buildAccountTiers(
+	acc: AccountState,
+	lowBalance: boolean,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+	opts: AccountRenderOptions = {},
+): string[] {
 	const gem = lowBalance ? `${glyphs.warn} ${glyphs.gem}` : glyphs.gem;
 	const bal = acc.balance !== null ? `${gem} ${formatBalHc(acc.balance)} hc` : undefined;
 	const hourRate =
 		acc.rate !== null ? `${formatRateCompact(acc.rate.remainingHour)}/${formatRateCompact(acc.rate.limitHour)}/h` : undefined;
 	const dayRate =
 		acc.rate !== null ? `${formatRateCompact(acc.rate.remainingDay)}/${formatRateCompact(acc.rate.limitDay)}/d` : undefined;
-	const auth = acc.authDaysLeft !== null ? `${glyphs.auth} ${acc.authDaysLeft}d` : undefined;
+	const auth = !opts.hideAuthExpiry && acc.authDaysLeft !== null ? `${glyphs.auth} ${acc.authDaysLeft}d` : undefined;
 	const team = acc.teamName?.trim() || undefined;
 	// Team and gem form one identity unit (space-separated, no middot);
 	// rate-limit and auth atoms trail it separated by " · ".
@@ -299,7 +314,12 @@ export function buildRateMeter(remaining: number, limit: number): string {
  * Missing atoms are omitted rather than replaced with placeholders, and the
  * team name is never included (Atelier owns panel identity).
  */
-export function buildAccountSidebarRows(acc: AccountState, lowBalance: boolean, glyphs: GlyphSet = UNICODE_GLYPHS): SidebarRow[] {
+export function buildAccountSidebarRows(
+	acc: AccountState,
+	lowBalance: boolean,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+	opts: AccountRenderOptions = {},
+): SidebarRow[] {
 	const rows: SidebarRow[] = [];
 	if (acc.balance !== null) {
 		rows.push({ text: `${glyphs.gem} ${formatBalHc(acc.balance)} hc`, role: lowBalance ? "warning" : "ready" });
@@ -318,7 +338,7 @@ export function buildAccountSidebarRows(acc: AccountState, lowBalance: boolean, 
 			});
 		}
 	}
-	if (acc.authDaysLeft !== null) {
+	if (!opts.hideAuthExpiry && acc.authDaysLeft !== null) {
 		rows.push({ text: `expires ${acc.authDaysLeft}d`, role: "dim" });
 	}
 	return rows;
@@ -331,11 +351,17 @@ export function buildAccountSidebarRows(acc: AccountState, lowBalance: boolean, 
  * layout must not depend on padding or escape codes. Rows render with the
  * caller's glyph set (auto degrades to ASCII on legacy terminals).
  */
-export function buildSidebarRows(stats: SessionStats, acc: AccountState, lowBalance: boolean, glyphs: GlyphSet = UNICODE_GLYPHS): SidebarRow[] {
+export function buildSidebarRows(
+	stats: SessionStats,
+	acc: AccountState,
+	lowBalance: boolean,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+	opts: AccountRenderOptions = {},
+): SidebarRow[] {
 	const rows: SidebarRow[] = [];
 	const sessionLine = buildSessionLine(stats, glyphs);
 	if (sessionLine) rows.push({ text: sessionLine, role: "muted" });
-	const accountRows = buildAccountSidebarRows(acc, lowBalance, glyphs);
+	const accountRows = buildAccountSidebarRows(acc, lowBalance, glyphs, opts);
 	if (sessionLine && accountRows.length > 0) rows.push(SIDEBAR_DIVIDER_ROW);
 	rows.push(...accountRows);
 	return rows;
@@ -359,6 +385,8 @@ export interface SidebarPanelOptions {
 	account: AccountState;
 	/** Balance is at/below the low-balance threshold (drives the row role). */
 	lowBalance: boolean;
+	/** Omit the OAuth device-session expiry atom from the account rows. */
+	hideAuthExpiry?: boolean;
 }
 
 export interface SidebarPanelDecision {
@@ -378,7 +406,8 @@ export interface SidebarPanelDecision {
  * buildSidebarRows, so their metrics never render here.
  */
 export function buildSidebarPanel(options: SidebarPanelOptions, glyphs: GlyphSet = UNICODE_GLYPHS): SidebarPanelDecision {
-	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance } = options;
+	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance, hideAuthExpiry } =
+		options;
 	if (!compatible || !isProviderActive) return { publish: false, rows: [] };
 	if (sessionMode !== "sidebar" && accountMode !== "sidebar") return { publish: false, rows: [] };
 	const rows = buildSidebarRows(
@@ -386,6 +415,7 @@ export function buildSidebarPanel(options: SidebarPanelOptions, glyphs: GlyphSet
 		accountMode === "sidebar" ? account : EMPTY_ACCOUNT,
 		lowBalance,
 		glyphs,
+		{ hideAuthExpiry },
 	);
 	if (rows.length === 0) {
 		rows.push({ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" });

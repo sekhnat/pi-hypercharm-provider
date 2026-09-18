@@ -265,6 +265,7 @@ assert.deepEqual(coerceStatusConfig(undefined), {
 	session: "sidebar",
 	account: "sidebar",
 	hideOnOtherProvider: true,
+	hideAuthExpiry: false,
 	lowBalanceHc: 25,
 	glyphs: "auto",
 });
@@ -272,6 +273,7 @@ assert.deepEqual(coerceStatusConfig({ session: "bogus", lowBalanceHc: -3 }), {
 	session: "sidebar",
 	account: "sidebar",
 	hideOnOtherProvider: true,
+	hideAuthExpiry: false,
 	lowBalanceHc: 25,
 	glyphs: "auto",
 });
@@ -279,6 +281,7 @@ assert.deepEqual(coerceStatusConfig({ session: "statusbar", account: "off", hide
 	session: "statusbar",
 	account: "off",
 	hideOnOtherProvider: false,
+	hideAuthExpiry: false,
 	lowBalanceHc: null,
 	glyphs: "auto",
 });
@@ -286,6 +289,7 @@ assert.deepEqual(coerceStatusConfig({ session: "widget", account: "widget" }), {
 	session: "widget",
 	account: "widget",
 	hideOnOtherProvider: true,
+	hideAuthExpiry: false,
 	lowBalanceHc: 25,
 	glyphs: "auto",
 });
@@ -293,6 +297,63 @@ assert.equal(coerceStatusConfig({ lowBalanceHc: 42 }).lowBalanceHc, 42);
 assert.equal(coerceStatusConfig({ lowBalanceHc: false }).lowBalanceHc, null);
 assert.deepEqual(coerceStatusConfig(null).session, "sidebar");
 assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).session, "sidebar");
+
+// ── hideAuthExpiry: coercion + render suppression ──
+{
+	// coercion: boolean honored; absent, null-shaped, and non-boolean fall back to false
+	assert.equal(coerceStatusConfig({ hideAuthExpiry: true }).hideAuthExpiry, true);
+	assert.equal(coerceStatusConfig({ hideAuthExpiry: false }).hideAuthExpiry, false);
+	assert.equal(coerceStatusConfig({ hideAuthExpiry: "yes" }).hideAuthExpiry, false);
+	assert.equal(coerceStatusConfig({}).hideAuthExpiry, false);
+	assert.equal(coerceStatusConfig(null).hideAuthExpiry, false);
+
+	// tiers: auth atom drops, every other atom and tier compaction unchanged
+	const hiddenTiers = buildAccountTiers(full, false, UNICODE_GLYPHS, { hideAuthExpiry: true });
+	assert.equal(hiddenTiers[0], "ACME Team ◆ 249 hc · 996/1k/h · 10k/10k/d");
+	assert.ok(hiddenTiers.every((t) => !t.includes("⟳")), "no tier keeps the auth atom");
+	assert.deepEqual(hiddenTiers, buildAccountTiers(acc({ balance: 249, teamName: "ACME Team", rate }), false), "hidden tiers equal the tiers of an account without the auth atom");
+	for (let i = 1; i < hiddenTiers.length; i++) {
+		assert.ok(termVisWidth(hiddenTiers[i]) <= termVisWidth(hiddenTiers[i - 1]), `tier ${i} wider than previous`);
+	}
+	// dedupe still collapses adjacent identical tiers once the atom is suppressed
+	assert.deepEqual(buildAccountTiers(acc({ teamName: "ACME", authDaysLeft: 29 }), false, UNICODE_GLYPHS, { hideAuthExpiry: true }), ["ACME"]);
+	// ASCII set hides the same atom
+	assert.equal(buildAccountTiers(acc({ balance: 10, authDaysLeft: 29 }), true, ASCII_GLYPHS, { hideAuthExpiry: true })[0], "! + 10 hc");
+
+	// sidebar rows: expiry row drops, meters and the divider stay
+	const hiddenRows = buildSidebarRows({ requests: 7, spendHc: 1.24 }, full, false, UNICODE_GLYPHS, { hideAuthExpiry: true });
+	assert.deepEqual(hiddenRows, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+	]);
+	assert.deepEqual(buildAccountSidebarRows(full, false, UNICODE_GLYPHS, { hideAuthExpiry: true }), [
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+	]);
+
+	// panel decision layer passes the flag through to the account rows
+	const hiddenPanel = buildSidebarPanel({
+		compatible: true,
+		isProviderActive: true,
+		sessionMode: "sidebar" as const,
+		accountMode: "sidebar" as const,
+		sessionStats: { requests: 7, spendHc: 1.24 },
+		account: full,
+		lowBalance: false,
+		hideAuthExpiry: true,
+	});
+	assert.deepEqual(hiddenPanel.rows, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
+		{ text: "◆ 249 hc", role: "ready" },
+		{ text: "hour [■■■■■■■■] 996/1k", role: "muted" },
+		{ text: "day [■■■■■■■■] 10k/10k", role: "muted" },
+	]);
+}
 
 // ── sidebar panel publication decision ──
 {

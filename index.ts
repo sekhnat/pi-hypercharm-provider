@@ -306,6 +306,7 @@ function writeStatusConfig(): void {
 		raw.session = statusConfig.session;
 		raw.account = statusConfig.account;
 		raw.hideOnOtherProvider = statusConfig.hideOnOtherProvider;
+		raw.hideAuthExpiry = statusConfig.hideAuthExpiry;
 		raw.lowBalanceHc = statusConfig.lowBalanceHc;
 		raw.glyphs = statusConfig.glyphs;
 		fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
@@ -664,9 +665,10 @@ function renderStatus(ctx: ExtensionContext): void {
 	const lowBalance =
 		statusConfig.lowBalanceHc !== null && account.balance !== null && account.balance <= statusConfig.lowBalanceHc;
 	const sessionLine = statusConfig.session !== "off" ? buildSessionLine(sessionStats, glyphs) : undefined;
-	const accTiers = accountVisible ? buildAccountTiers(account, lowBalance, glyphs) : [];
+	const accTiers = accountVisible ? buildAccountTiers(account, lowBalance, glyphs, { hideAuthExpiry: statusConfig.hideAuthExpiry }) : [];
 	const sessionLineW = widgetClamped && statusConfig.session !== "off" ? buildSessionLine(sessionStats, widgetGlyphs) : sessionLine;
-	const accTiersW = widgetClamped && accountVisible ? buildAccountTiers(account, lowBalance, widgetGlyphs) : accTiers;
+	const accTiersW =
+		widgetClamped && accountVisible ? buildAccountTiers(account, lowBalance, widgetGlyphs, { hideAuthExpiry: statusConfig.hideAuthExpiry }) : accTiers;
 
 	// Sidebar panel: parts targeted at "sidebar" publish here whenever a
 	// compatible host is present and a HyperCharm model is active — panel
@@ -686,6 +688,7 @@ function renderStatus(ctx: ExtensionContext): void {
 		sessionStats,
 		account,
 		lowBalance,
+		hideAuthExpiry: statusConfig.hideAuthExpiry,
 	}, glyphs);
 	if (panel.publish) {
 		publisher().update({
@@ -779,11 +782,11 @@ function commitPending(ctx: ExtensionContext): void {
 
 function statusSummary(): string {
 	const lb = statusConfig.lowBalanceHc === null ? "off" : `${statusConfig.lowBalanceHc}`;
-	return `session=${statusConfig.session}, account=${statusConfig.account}, hideOnOtherProvider=${statusConfig.hideOnOtherProvider}, lowBalanceHc=${lb}, glyphs=${statusConfig.glyphs}`;
+	return `session=${statusConfig.session}, account=${statusConfig.account}, hideOnOtherProvider=${statusConfig.hideOnOtherProvider}, hideAuthExpiry=${statusConfig.hideAuthExpiry}, lowBalanceHc=${lb}, glyphs=${statusConfig.glyphs}`;
 }
 
 const STATUS_USAGE =
-	`Usage: /${STATUS_COMMAND} [session|account sidebar|widget|statusbar|off · hide true|false · lowBalance <hc>|off · glyphs auto|unicode|ascii · refresh · reset]`;
+	`Usage: /${STATUS_COMMAND} [session|account sidebar|widget|statusbar|off · hide true|false · authexpiry true|false · lowBalance <hc>|off · glyphs auto|unicode|ascii · refresh · reset]`;
 
 async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise<void> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -850,6 +853,18 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 		return;
 	}
 
+	if (key === "authexpiry" && tokens.length === 2) {
+		if (value !== "true" && value !== "false") {
+			ctx.ui.notify(STATUS_USAGE, "error");
+			return;
+		}
+		statusConfig.hideAuthExpiry = value === "true";
+		writeStatusConfig();
+		updateStatus(ctx);
+		ctx.ui.notify(`HyperCharm status. ${statusSummary()}`, "info");
+		return;
+	}
+
 	if (key === "lowbalance" && tokens.length === 2) {
 		if (value === "off") {
 			statusConfig.lowBalanceHc = null;
@@ -893,6 +908,7 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 		const sessionOpt = `Session line (spend/requests): ${statusConfig.session}`;
 		const accountOpt = `Account line (team/balance/rate limits): ${statusConfig.account}`;
 		const hideOpt = `Hide on other providers: ${statusConfig.hideOnOtherProvider ? "on" : "off"}`;
+		const authExpiryOpt = `Hide auth expiry: ${statusConfig.hideAuthExpiry ? "on" : "off"}`;
 		const lbOpt = `Low-balance warning: ${lb}`;
 		const glyphOpt = `Glyphs (legacy terminals): ${statusConfig.glyphs}`;
 		const refreshOpt = "Refresh balance now";
@@ -902,6 +918,7 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 			sessionOpt,
 			accountOpt,
 			hideOpt,
+			authExpiryOpt,
 			lbOpt,
 			glyphOpt,
 			refreshOpt,
@@ -928,6 +945,12 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 		}
 		if (choice === hideOpt) {
 			statusConfig.hideOnOtherProvider = !statusConfig.hideOnOtherProvider;
+			writeStatusConfig();
+			updateStatus(ctx);
+			continue;
+		}
+		if (choice === authExpiryOpt) {
+			statusConfig.hideAuthExpiry = !statusConfig.hideAuthExpiry;
 			writeStatusConfig();
 			updateStatus(ctx);
 			continue;
