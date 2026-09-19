@@ -74,7 +74,12 @@ function makeHarness(provider = "hypercharm"): Harness {
 		mode: "tui",
 		hasUI: false,
 		model: { provider },
-		modelRegistry: { getApiKeyForProvider: async () => "key" },
+		// The account runtime resolves credentials through the real registry's
+		// getProviderAuth; mirror that boundary here.
+		modelRegistry: {
+			getApiKeyForProvider: async () => "key",
+			getProviderAuth: async () => ({ auth: { apiKey: "key" } }),
+		},
 		ui: {
 			theme: { fg: (_color: string, text: string) => text },
 			setStatus: (key: string, value: string | undefined) => {
@@ -92,8 +97,10 @@ function makeHarness(provider = "hypercharm"): Harness {
 	};
 	const pi = {
 		events,
-		registerProvider: (_id: string, config: Record<string, unknown>) => {
-			registered.push(config);
+		// Native (complete Provider) and legacy (name + config) forms both land
+		// in `registered`; the extension now uses the native form.
+		registerProvider: (idOrProvider: string | Record<string, unknown>, config?: Record<string, unknown>) => {
+			registered.push(typeof idOrProvider === "string" ? config! : idOrProvider);
 		},
 		registerCommand: (name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
 			commands.set(name, spec.handler);
@@ -419,6 +426,9 @@ const withChildEnv = async <T>(fn: () => Promise<T>): Promise<T> => {
 	await sessionStart(h);
 	await h.runCommand("session sidebar");
 	await h.runCommand("account sidebar");
+	// The account-on command fires a forced refresh whose render lands after
+	// the fetch chain settles; drain before reading the panel.
+	await settlePromises();
 	await h.discover(["panel-defaults-v1"]);
 	// Seed the parent's own lineage (session:<id> — the stub ctx has no
 	// sessionManager, so renderStatus aggregates under the empty key and finds

@@ -144,9 +144,8 @@
 
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import { USER_AGENT, loginHypercharm, refreshHypercharmToken } from "./oauth";
+import { HYPER_API_URL, PI_DEVICE_NAME } from "./hyper";
 import {
 	API_KEY_ENV,
 	API_KEY_PLACEHOLDER,
@@ -154,7 +153,6 @@ import {
 	CACHE_FILE_NAME,
 	CONFIG_FILE_NAME,
 	PRISM_ENTRY_TYPE,
-	PROVIDER_DISPLAY_NAME,
 	PROVIDER_ID,
 	STATUS_COMMAND,
 	STATUS_KEY_ACCOUNT,
@@ -175,24 +173,14 @@ import {
 	type LineageUsage,
 	type UsageLedgerRecord,
 } from "./ledger";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import modelsData from "./models.json" with { type: "json" };
 import customModelsData from "./custom-models.json" with { type: "json" };
 import patchData from "./patch.json" with { type: "json" };
 import deprecatedData from "./deprecated-models.json" with { type: "json" };
-import pkg from "./package.json" with { type: "json" };
-import {
-	buildModels,
-	embeddedCatalogHash,
-	mergeStaleModels,
-	mergeWithEmbedded,
-	parseModelsCache,
-	transformApiModel,
-	type DeprecatedData,
-	type JsonModel,
-	type ModelsCache,
-	type PatchData,
-} from "./model-catalog";
+import { createAccountRuntime, CREDITS_MIN_INTERVAL_MS } from "./account";
+import { createHypercharmProvider } from "./provider";
+import { embeddedCatalogHash, parseModelsCache, type DeprecatedData, type JsonModel } from "./model-catalog";
 import {
 	applyOptimisticSpend,
 	buildAccountTiers,
@@ -214,7 +202,6 @@ import {
 } from "./status";
 import { createSidebarUsagePublisher, type EventTransport, type SidebarUsagePublisher } from "./sidebar";
 import fs from "fs";
-import { hostname } from "os";
 import path from "path";
 
 const openAICompletions = openAICompletionsApi();
@@ -229,100 +216,35 @@ function describeError(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function warnAccountFetch(label: string, reason: string): void {
-	notifier.warn(`Unable to refresh HyperCharm ${label}: ${reason}.`);
-}
+// ─── Model Catalog Sources ────────────────────────────────────────────────────
+// Pi's standard model store is the primary persisted catalog (owned by the
+// complete provider in provider.ts). The namespaced legacy cache below is a
+// READ-ONLY compatibility input: it seeds the initial snapshot for rollback
+// safety, and new successful refreshes persist only through pi.
 
-// ─── Stale-While-Revalidate Model Sync ────────────────────────────────────────
-
-const BASE_URL = "https://hyper.charm.land/v1";
-const MODELS_URL = `${BASE_URL}/provider`;
 const CACHE_DIR = path.join(getAgentDir(), "cache");
 const CACHE_PATH = path.join(CACHE_DIR, CACHE_FILE_NAME);
-const LIVE_FETCH_TIMEOUT_MS = 8000;
 const EMBEDDED_HASH = embeddedCatalogHash(modelsData as JsonModel[]);
-const VERSION = (pkg as { version?: string }).version ?? "0.0.0";
 
-async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<JsonModel[] | null> {
-	try {
-		const response = await fetch(MODELS_URL, {
-			headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": USER_AGENT },
-			signal: signal ? AbortSignal.any([AbortSignal.timeout(LIVE_FETCH_TIMEOUT_MS), signal]) : AbortSignal.timeout(LIVE_FETCH_TIMEOUT_MS),
-		});
-		if (!response.ok) {
-			notifier.warn(`HyperCharm model catalog refresh failed: HTTP ${response.status} — serving cached/embedded models.`);
-			return null;
-		}
-		const data = await response.json();
-		const apiModels = Array.isArray(data) ? data : (data.models || data.data || []);
-		if (!Array.isArray(apiModels) || apiModels.length === 0) {
-			notifier.warn("HyperCharm model catalog refresh returned no usable models — serving cached/embedded models.");
-			return null;
-		}
-		return apiModels.map(transformApiModel).filter((m): m is JsonModel => m !== null);
-	} catch (err) {
-		// An aborted signal means the session was replaced, not that Hyper failed.
-		if (!signal?.aborted) {
-			notifier.warn(`HyperCharm model catalog refresh failed: ${describeError(err)} — serving cached/embedded models.`);
-		}
-		return null;
-	}
-}
-
-function loadCachedModels(): ModelsCache | null {
+/**
+ * Read the namespaced legacy cache. The flag says whether this release's
+ * embedded curation wins shared ids (hash mismatch / legacy bare-array cache):
+ * shipped curated fixes are never masked by stale on-disk data either way.
+ */
+function loadLegacyCache(): { models: JsonModel[]; preferEmbedded: boolean } | null {
 	try {
 		const parsed = parseModelsCache(JSON.parse(fs.readFileSync(CACHE_PATH, "utf8")));
-		if (parsed === null) {
-			notifier.warn(`Ignoring malformed HyperCharm model cache at ${CACHE_PATH}.`);
+		if (parsed === null || parsed.models.length === 0) {
+			if (parsed === null) notifier.warn(`Ignoring malformed HyperCharm model cache at ${CACHE_PATH}.`);
+			return null;
 		}
-		return parsed;
+		return { models: parsed.models, preferEmbedded: parsed.embeddedHash !== EMBEDDED_HASH };
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
 			notifier.warn(`Ignoring unreadable HyperCharm model cache at ${CACHE_PATH}: ${describeError(err)}.`);
 		}
 		return null;
 	}
-}
-
-function cacheModels(models: JsonModel[]): void {
-	try {
-		fs.mkdirSync(CACHE_DIR, { recursive: true });
-		const envelope = { version: VERSION, embeddedHash: EMBEDDED_HASH, models };
-		fs.writeFileSync(CACHE_PATH, JSON.stringify(envelope, null, 2) + "\n");
-	} catch (err) {
-		// Non-fatal: the freshly fetched catalog still serves this session.
-		notifier.warn(`Could not write the HyperCharm model cache to ${CACHE_PATH}: ${describeError(err)}.`);
-	}
-}
-
-function loadStaleModels(embeddedModels: JsonModel[], graveyard: DeprecatedData): JsonModel[] {
-	const cached = loadCachedModels();
-	if (!cached || cached.models.length === 0) return embeddedModels;
-
-	// Cache written against different embedded content (older/newer release, or
-	// a legacy bare-array cache): this release's curated catalog wins for shared
-	// ids and the cache contributes only its extra ids, so fixes shipped in a
-	// release are never masked by stale on-disk data. Graveyard ids never come
-	// from the cache — the grace layer owns a delisted model's lifetime.
-	const preferEmbedded = cached.embeddedHash !== EMBEDDED_HASH;
-	return mergeStaleModels(cached.models, embeddedModels, preferEmbedded, graveyard);
-}
-async function revalidateModels(apiKey: string | undefined, embeddedModels: JsonModel[], signal?: AbortSignal): Promise<JsonModel[] | null> {
-	if (!apiKey) return null;
-	const liveModels = await fetchLiveModels(apiKey, signal);
-	if (!liveModels || liveModels.length === 0) return null;
-	const merged = mergeWithEmbedded(liveModels, embeddedModels);
-	cacheModels(merged);
-	return merged;
-}
-
-// ─── API Key Resolution (via ModelRegistry) ────────────────────────────────────
-
-let cachedApiKey: string | undefined;
-let revalidateAbort: AbortController | null = null;
-
-async function resolveApiKey(modelRegistry: ModelRegistry): Promise<void> {
-	cachedApiKey = await modelRegistry.getApiKeyForProvider(PROVIDER_ID) ?? undefined;
 }
 
 // ─── Status Display Configuration ──────────────────────────────────────────────
@@ -644,7 +566,9 @@ function streamHypercharm(
 	context: any,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const apiKey = (options as any)?.apiKey || cachedApiKey || "";
+	// The complete provider resolves auth per request (stored key over
+	// HYPERCHARM_API_KEY) and hands it to us through options.apiKey.
+	const apiKey = (options as any)?.apiKey || "";
 	if (!apiKey) {
 		throw new Error(
 			`No API key for HyperCharm. Add it to ~/.pi/agent/auth.json, ` +
@@ -652,7 +576,7 @@ function streamHypercharm(
 		);
 	}
 
-	const hyperModel = { ...model, api: "openai-completions", baseUrl: model.baseUrl || BASE_URL };
+	const hyperModel = { ...model, api: "openai-completions", baseUrl: model.baseUrl || HYPER_API_URL };
 
 	// Per-request fetch wrapper: owns its interceptor, safe under concurrency.
 	const upstreamFetch = options?.fetch ?? globalThis.fetch;
@@ -682,98 +606,52 @@ function streamHypercharm(
 	});
 }
 
-// ─── Account Metadata Fetching ────────────────────────────────────────────────
+// ─── Credential-Scoped Account Runtime ────────────────────────────────────────
+// Balance, team, and device-session acquisition lives in account.ts. This
+// module only wires lifecycle triggers to it and renders committed snapshots:
+// the runtime owns auth resolution, credential epochs, coalescing, staged
+// first sweeps, and per-endpoint backoff (specs/account-status-refresh).
 
-const CREDITS_MIN_INTERVAL_MS = 15_000;
-const ACCOUNT_FETCH_TIMEOUT_MS = 8_000;
-
-let statusAbort: AbortController | null = null;
 // Bumped on every session_start; async continuations compare against this to
-// drop work belonging to a replaced session (its ctx is stale and throws).
+// drop renders belonging to a replaced session (its ctx is stale and throws).
 let statusEpoch = 0;
-let lastCreditsFetchAt = 0;
-let creditsInFlight: Promise<void> | null = null;
-let metaFetched = false;
 
-type FetchJsonResult = { ok: true; value: any } | { ok: false };
+/** Latest session context; the runtime's credential resolver reads through it. */
+let accountCtx: ExtensionContext | undefined;
 
-async function fetchJsonGet(url: string, apiKey: string, signal: AbortSignal | undefined, label: string): Promise<FetchJsonResult> {
+async function resolveAccountCredential(): Promise<string | undefined> {
+	const ctx = accountCtx;
+	if (!ctx) return undefined;
 	try {
-		const response = await fetch(url, {
-			headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": USER_AGENT },
-			signal: signal
-				? AbortSignal.any([AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS), signal])
-				: AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT_MS),
-		});
-		if (!response.ok) {
-			warnAccountFetch(label, `HTTP ${response.status}`);
-			return { ok: false };
-		}
-		return { ok: true, value: await response.json() };
-	} catch (err) {
-		// An abort means the session was replaced or shut down, not a failure.
-		if (!signal?.aborted) warnAccountFetch(label, describeError(err));
-		return { ok: false };
+		const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+		return auth?.auth.apiKey;
+	} catch {
+		return undefined; // stale ctx after a session replacement
 	}
 }
 
-/** Canonical Hypercredit balance from /v1/credits. Throttled unless forced. */
-function refreshCredits(apiKey: string | undefined, signal: AbortSignal | undefined, force: boolean): Promise<void> {
-	if (!apiKey) return Promise.resolve();
-	if (!force && Date.now() - lastCreditsFetchAt < CREDITS_MIN_INTERVAL_MS) return Promise.resolve();
-	lastCreditsFetchAt = Date.now();
-	if (creditsInFlight) return creditsInFlight;
-	creditsInFlight = (async () => {
-		try {
-			const result = await fetchJsonGet(`${BASE_URL}/credits`, apiKey, signal, "Hypercredit balance");
-			if (!result.ok) return;
-			const data = result.value;
-			// /credits can report hypercredits ("balance") or USD ("balance_usd",
-			// USD-billed accounts). Handle both at the observed 20 hc = $1 rate so a
-			// server-side unit switch can never silently freeze the balance readout.
-			const rawBalance = typeof data?.balance === "number" ? data.balance : typeof data?.balance_usd === "number" ? data.balance_usd * 20 : undefined;
-			if (typeof rawBalance === "number" && Number.isFinite(rawBalance)) {
-				account.balance = rawBalance;
-			}
-		} finally {
-			creditsInFlight = null;
-		}
-	})();
-	return creditsInFlight;
+const accountRuntime = createAccountRuntime({
+	resolveCredential: resolveAccountCredential,
+	warn: (message) => notifier.warn(message),
+	deviceName: PI_DEVICE_NAME,
+});
+
+/** Copy committed, attributed atoms into the display state. Rate-limit state
+ * stays here: it comes from chat-completion headers, not these endpoints. */
+function syncAccountFromRuntime(): void {
+	const snap = accountRuntime.snapshot();
+	if (snap.key === undefined) return;
+	account.balance = snap.balance;
+	account.teamName = snap.teamName;
+	account.authDaysLeft = snap.authDaysLeft;
 }
 
-/** Team name (/v1/teams) + OAuth device-session expiry (/v1/devices). */
-async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSignal): Promise<void> {
-	if (!apiKey || metaFetched) return;
-	const [teams, devices] = await Promise.all([
-		fetchJsonGet(`${BASE_URL}/teams`, apiKey, signal, "team metadata"),
-		fetchJsonGet(`${BASE_URL}/devices`, apiKey, signal, "device sessions"),
-	]);
-	if (signal?.aborted) return;
-
-	const teamName = teams.ok ? teams.value?.items?.[0]?.name : undefined;
-	if (typeof teamName === "string" && teamName.trim()) {
-		account.teamName = teamName.trim();
-	}
-
-	// Devices: the OAuth device flow registers this machine as
-	// `Pi (<hostname>)`. Match by name; skip silently for API-key auth
-	// (the endpoint returns OAuth sessions and may be empty).
-	if (devices.ok && Array.isArray(devices.value?.items)) {
-		const own = (devices.value.items as Array<{ name?: unknown; expires_at?: unknown }>).find(
-			(d) => typeof d?.name === "string" && d.name === `Pi (${hostname()})`,
-		);
-		const expMs = own ? Date.parse(String(own.expires_at ?? "")) : NaN;
-		if (!Number.isNaN(expMs)) {
-			account.authDaysLeft = Math.max(0, Math.ceil((expMs - Date.now()) / 86_400_000));
-		}
-	}
-
-	// One completed sweep stops the per-turn retries even when the account
-	// exposes no atoms (API-key auth has no /v1/devices entries). Failed
-	// fetches keep retrying on the next activity.
-	metaFetched = teams.ok && devices.ok;
+/** One account refresh; resolves when this invocation's eligible work settles. */
+function accountRefresh(force: boolean): Promise<void> {
+	return accountRuntime.refresh({ force }).then(syncAccountFromRuntime);
 }
+
+// (Endpoint fetching moved to account.ts — see the runtime above.)
 
 // ─── Drift-Window Reconciliation ──────────────────────────────────────────────
 // Armed by a fabric_exec tool execution; while armed, a timer re-reads the
@@ -829,9 +707,7 @@ function armDriftWindow(ctx: ExtensionContext): void {
 				lastSeenSpend = usage.summary.spendHc;
 				// Throttled refresh: new child spend moves the balance within the
 				// existing credits cadence, no forced call.
-				void refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false).then(() =>
-					updateStatus(ctx),
-				);
+				void accountRefresh(false).then(() => updateStatus(ctx));
 			}
 			if (usage.latestRate && (!account.rate || usage.latestRate.capturedAt >= account.rate.capturedAt)) {
 				// Merge the newest child-observed snapshot into account state
@@ -847,7 +723,7 @@ function armDriftWindow(ctx: ExtensionContext): void {
 						if (!isStaleCtxError(err)) throw err;
 					}
 				}
-				void refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true).then(() => updateStatus(ctx));
+				void accountRefresh(true).then(() => updateStatus(ctx));
 			}
 			if (usage.latestTs !== undefined && Date.now() - usage.latestTs > DRIFT_WINDOW_QUIET_MS) {
 				stopDriftWindow();
@@ -1056,8 +932,9 @@ function resetStatusState(): void {
 	pendingSawOutOfCredits = false;
 	pendingRateSnapshot = undefined;
 	outOfCreditsNotified = false;
-	lastCreditsFetchAt = 0;
-	metaFetched = false;
+	// Account fetch state (throttles, in-flight work, retry gates) is owned by
+	// the credential-scoped runtime; the committed snapshot survives the
+	// session under its original attribution and is re-synced on session start.
 	// A replaced session's drift window dies with its epoch on the next tick;
 	// stopping here keeps the old timer from observing a fresh session's key.
 	stopDriftWindow();
@@ -1107,7 +984,7 @@ function commitPending(ctx: ExtensionContext): void {
 	if (pendingSawOutOfCredits) {
 		pendingSawOutOfCredits = false;
 		// Re-fetch now so the balance reflects exhaustion immediately
-		updateStatusAfter(refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true), ctx);
+		updateStatusAfter(accountRefresh(true), ctx);
 		if (!outOfCreditsNotified && ctx.hasUI) {
 			outOfCreditsNotified = true;
 			ctx.ui.notify("HyperCharm is out of Hypercredits — recharge at hyper.charm.land", "error");
@@ -1142,11 +1019,9 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 	const value = rawValue?.toLowerCase();
 
 	if (key === "refresh") {
-		metaFetched = false;
-		await Promise.all([
-			refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true),
-			refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined),
-		]);
+		// Explicit user refresh: bypasses the automatic retry gates while still
+		// coalescing with compatible in-flight work (specs/account-status-refresh).
+		await accountRefresh(true);
 		updateStatus(ctx);
 		const bal = account.balance !== null ? `${account.balance} hc` : "unknown";
 		ctx.ui.notify(`HyperCharm balance: ${bal}. ${statusSummary()}`, "info");
@@ -1170,8 +1045,7 @@ async function handleStatusCommand(args: string, ctx: ExtensionContext): Promise
 		writeStatusConfig();
 		if (value !== "off" && key === "account") {
 			// Turning account on: make sure we have data to show
-			updateStatusAfter(refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true), ctx);
-			void refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
+			updateStatusAfter(accountRefresh(true), ctx);
 		}
 		updateStatus(ctx);
 		ctx.ui.notify(`HyperCharm ${key} line: ${value}. ${statusSummary()}`, "info");
@@ -1275,8 +1149,7 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 			statusConfig.account = nextMode(statusConfig.account);
 			writeStatusConfig();
 			if (statusConfig.account !== "off") {
-				updateStatusAfter(refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true), ctx);
-				void refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
+				updateStatusAfter(accountRefresh(true), ctx);
 			}
 			continue;
 		}
@@ -1311,11 +1184,7 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 			continue;
 		}
 		if (choice === refreshOpt) {
-			metaFetched = false;
-			await Promise.all([
-				refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true),
-				refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined),
-			]);
+			await accountRefresh(true);
 			updateStatus(ctx);
 			continue;
 		}
@@ -1324,50 +1193,32 @@ async function configureStatusInteractive(ctx: ExtensionContext): Promise<void> 
 
 // ─── Extension Entry Point ────────────────────────────────────────────────────
 
-// The currently-registered model list — starts stale, hot-swapped when the
-// live catalog lands. Provider identity funnels through makeProviderConfig so
-// the stream handler and models never desync.
-let currentModels: JsonModel[] = [];
-
-function makeProviderConfig(models: JsonModel[] = currentModels) {
-	return {
-		baseUrl: BASE_URL,
-		apiKey: API_KEY_PLACEHOLDER,
-		// Custom API name so our streamSimple registers as its own handler and
-		// never shadows pi's built-in openai-completions pipeline for other
-		// providers. streamHypercharm delegates to pi-ai's OpenAI-compat streamer.
-		api: API_NAME,
-		models,
-		streamSimple: streamHypercharm,
-		oauth: {
-			name: PROVIDER_DISPLAY_NAME,
-			login: (callbacks: OAuthLoginCallbacks) => loginHypercharm(callbacks),
-			refreshToken: (credentials: OAuthCredentials, signal?: AbortSignal) => refreshHypercharmToken(credentials, signal),
-			getApiKey: (credentials: OAuthCredentials) => String(credentials.access ?? ""),
-		},
-	};
-}
-
 export default function (pi: ExtensionAPI) {
-	const embeddedModels = modelsData as JsonModel[];
-	const customModels = customModelsData as JsonModel[];
-	const patches = patchData as PatchData;
-	const deprecated = deprecatedData as DeprecatedData;
-
 	// Prism routing state: collected per assistant request, committed at turn_end.
 	let collectingPrismRoute = false;
 	let prismRoute: PrismRoute | undefined;
-
-	const staleBase = loadStaleModels(embeddedModels, deprecated);
-	const staleModels = buildModels(staleBase, customModels, patches, deprecated);
-	currentModels = staleModels;
 
 	// Subscribe to sidebar discovery at factory time: Pi completes extension
 	// factory initialization before dispatching session lifecycle events, so
 	// this observes Atelier's discovery regardless of load order.
 	initSidebarPublisher(pi);
 
-	pi.registerProvider(PROVIDER_ID, makeProviderConfig(staleModels));
+	// The complete hypercharm provider registers ONCE at factory time: it owns
+	// authentication (stored key over HYPERCHARM_API_KEY, lazily loaded OAuth),
+	// the current curated catalog snapshot, pi-store restore/refresh, and the
+	// namespaced streamSimple interceptor. Session events no longer re-register
+	// anything (specs/model-catalog).
+	pi.registerProvider(
+		createHypercharmProvider({
+			embeddedModels: modelsData as JsonModel[],
+			customModels: customModelsData as JsonModel[],
+			patch: patchData,
+			deprecated: deprecatedData as unknown as DeprecatedData,
+			loadLegacyCache,
+			warn: (message) => notifier.warn(message),
+			streamSimple: streamHypercharm,
+		}),
+	);
 
 	pi.registerCommand(STATUS_COMMAND, {
 		description: "Configure the HyperCharm footer status (session spend, balance, rate limits)",
@@ -1378,71 +1229,38 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		notifier.activate(ctx);
-		const epoch = ++statusEpoch;
-		revalidateAbort?.abort();
-		revalidateAbort = new AbortController();
-		const signal = revalidateAbort.signal;
-		statusAbort?.abort();
-		statusAbort = new AbortController();
-		const statusSignal = statusAbort.signal;
+		++statusEpoch;
+		accountCtx = ctx;
+		// A replaced session invalidates the previous one's account leases and
+		// aborts its in-flight work; the committed snapshot is retained under
+		// its original credential attribution.
+		accountRuntime.deactivate();
 
 		loadStatusConfig();
 		resetStatusState();
 		// Parent-side GC of shards past retention (best-effort, silent).
 		if (!isFabricChild()) gcLedgerShards(new Date());
 		updateStatus(ctx); // clears carryover; publishes the panel when a HyperCharm model is active
-		// Re-register so our identity (custom api + streamSimple) always wins
-		// over anything that touched provider registration during load.
-		pi.registerProvider(PROVIDER_ID, makeProviderConfig());
-
-		// A failure here used to vanish: no key resolved meant no refresh and no
-		// diagnostics. Surface it, then continue — without a key we serve the
-		// embedded/cached catalog.
-		resolveApiKey(ctx.modelRegistry)
-			.catch((err) => {
-				notifier.warn(`Unable to resolve HyperCharm credentials: ${describeError(err)} — serving cached/embedded models.`);
-			})
-			.then(() => {
-			// A session replacement while the key resolved invalidated the
-			// captured ctx (fast-resume, /new, /fork); nothing below may touch it.
-			if (epoch !== statusEpoch) return;
-			// Prefetch credits/team metadata only when a HyperCharm model is active
-			// (pi-neuralwatt also prefetches so the first turn ends with data, but
-			// gating here avoids API calls in sessions that never use the provider).
-			// Fabric children skip all of it: no UI to show it and the ledger
-			// record carries the account facts home.
-			if (!isFabricChild() && currentProviderId(ctx) === PROVIDER_ID) {
-				updateStatusAfter(refreshCredits(cachedApiKey, statusSignal, true), ctx);
-				updateStatusAfter(refreshAccountMeta(cachedApiKey, statusSignal), ctx);
-			}
-			revalidateModels(cachedApiKey, embeddedModels, signal)
-				.catch((err) => {
-					// A session disposed (not replaced) mid-refresh invalidates the
-					// runtime without bumping the epoch; a late hot-swap must not
-					// reject unhandled. Same contract as updateStatus's stale guard.
-					if (!isStaleCtxError(err)) {
-						notifier.warn(`HyperCharm model catalog refresh failed: ${describeError(err)} — serving cached/embedded models.`);
-					}
-				})
-				.then((freshBase) => {
-					if (freshBase && epoch === statusEpoch && !signal.aborted) {
-						currentModels = buildModels(freshBase, customModels, patches, deprecated);
-						pi.registerProvider(PROVIDER_ID, makeProviderConfig());
-					}
-				})
-				.catch((err) => {
-					if (!isStaleCtxError(err)) throw err;
-				});
-		});
+		// Prefetch account metadata only when a HyperCharm model is active, so
+		// sessions that never use the provider make zero account calls. Fabric
+		// children skip it: no UI, and the ledger record carries the facts home.
+		if (!isFabricChild() && currentProviderId(ctx) === PROVIDER_ID) {
+			updateStatusAfter(accountRefresh(true), ctx);
+		}
 	});
 
 	pi.on("model_select", (event, ctx) => {
 		updateStatus(ctx);
 		const model: any = (event as any).model;
+		if (model?.provider !== PROVIDER_ID) {
+			// Switching away invalidates pending HyperCharm account work: no late
+			// status may render for another provider (specs/account-status-refresh).
+			accountRuntime.deactivate();
+			return;
+		}
 		// Child mode: no account prefetches (see session_start).
-		if (!isFabricChild() && model?.provider === PROVIDER_ID && cachedApiKey) {
-			updateStatusAfter(refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false), ctx);
-			void refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
+		if (!isFabricChild()) {
+			updateStatusAfter(accountRefresh(false), ctx);
 		}
 	});
 
@@ -1464,7 +1282,7 @@ export default function (pi: ExtensionAPI) {
 		// once we have real activity so the very first turn shows the balance.
 		// Child mode never fetches account state (the record carries the facts).
 		if (!isFabricChild() && sessionStats.requests > 0 && account.balance === null) {
-			await refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false);
+			await accountRefresh(false);
 		}
 		updateStatus(ctx);
 	});
@@ -1477,15 +1295,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (isFabricChild()) return;
 		if (sessionStats.requests > 0 || sessionStats.spendHc > 0) {
-			await refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false);
-			if (!metaFetched) await refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
+			await accountRefresh(false);
 			updateStatus(ctx);
 		}
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		revalidateAbort?.abort();
-		statusAbort?.abort();
+		// Abort this session's account work and invalidate its leases. The
+		// runtime itself lives for the process (like the catalog snapshot), so a
+		// later session in the same process keeps its last-known account data.
+		accountRuntime.deactivate();
 		stopDriftWindow();
 		ctx.ui.setStatus(STATUS_KEY_SESSION, undefined);
 		ctx.ui.setStatus(STATUS_KEY_ACCOUNT, undefined);

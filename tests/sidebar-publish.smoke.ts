@@ -76,7 +76,12 @@ function makeRuntime(modelProvider: string | undefined, apiKey: string | undefin
 			setWidget: (_key: string, value: unknown) => widgetValues.push(value),
 			notify: () => undefined,
 		},
-		modelRegistry: { getApiKeyForProvider: async () => apiKey },
+		// The account runtime resolves credentials through the real registry's
+		// getProviderAuth; mirror that boundary here.
+		modelRegistry: {
+			getApiKeyForProvider: async () => apiKey,
+			getProviderAuth: async () => (apiKey ? { auth: { apiKey } } : undefined),
+		},
 		model: { provider: modelProvider },
 	};
 	return {
@@ -109,6 +114,10 @@ const discover = (runtime: ReturnType<typeof makeRuntime>) =>
 		capabilities: ["panel-defaults-v1"],
 	});
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** Drain enough event-loop turns for stubbed-fetch response bodies to settle. */
+const settle = async () => {
+	for (let i = 0; i < 10; i++) await flush();
+};
 
 // ── Run 1 — no API key: selection publishes the placeholder, immediately ──────
 const idle = makeRuntime("hypercharm", undefined);
@@ -132,7 +141,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 		? { balance: 249 }
 		: url.includes("/teams")
 			? { items: [{ name: "ACME Team" }] }
-			: {};
+			: { items: [] }; // devices: valid empty (API-key auth has no OAuth sessions)
 	return new Response(JSON.stringify(body), { status: 200 });
 }) as typeof fetch;
 
@@ -140,7 +149,7 @@ const keyed = makeRuntime("hypercharm", "hc-test-key");
 await (factory as unknown as (api: unknown) => void)(keyed.pi);
 discover(keyed);
 await keyed.dispatch("session_start");
-await flush();
+await settle();
 assert.deepEqual(lastPanelRows(keyed), [{ text: "◆ 249 hc", role: "ready" }]);
 
 // ── Run 3 — switching providers withdraws; switching back re-publishes ────────
@@ -159,7 +168,7 @@ const [statusCommand] = keyed.commandHandlers;
 assert.ok(statusCommand, "hypercharm-status command registered");
 await statusCommand("session widget", keyed.ctx);
 await statusCommand("account widget", keyed.ctx);
-await flush();
+await settle();
 assert.ok(unregisters(keyed).length >= 2, "panel withdrawn once neither part targets the sidebar");
 assert.ok(
 	keyed.widgetValues.every((value) => value === undefined),
@@ -170,7 +179,7 @@ assert.equal(keyed.statusSlots.account, undefined, "no status bar account slot b
 
 await statusCommand("session statusbar", keyed.ctx);
 await statusCommand("account off", keyed.ctx);
-await flush();
+await settle();
 const registersAfterConfig = registers(keyed).length;
 assert.equal(registers(keyed).length, registersAfterConfig, "no panel for statusbar/off configuration");
 assert.equal(keyed.statusSlots.session, undefined, "status bar still silent before the first turn");
