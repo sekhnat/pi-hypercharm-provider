@@ -142,7 +142,7 @@
  * @see https://hyper.charm.land
  */
 
-import { clampThinkingLevel, streamOpenAICompletions } from "@earendil-works/pi-ai/compat";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessageEventStream, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
@@ -216,6 +216,8 @@ import { createSidebarUsagePublisher, type EventTransport, type SidebarUsagePubl
 import fs from "fs";
 import { hostname } from "os";
 import path from "path";
+
+const openAICompletions = openAICompletionsApi();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -652,15 +654,8 @@ function streamHypercharm(
 
 	const hyperModel = { ...model, api: "openai-completions", baseUrl: model.baseUrl || BASE_URL };
 
-	// pi hands the user's thinking selection as options.reasoning (a raw
-	// ThinkingLevel); streamOpenAICompletions only reads reasoningEffort.
-	// Replicate pi-ai's clamp+convert so levels reach the request body.
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(hyperModel, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
-	const { reasoning: _reasoning, ...streamOptions } = (options ?? {}) as any;
-
 	// Per-request fetch wrapper: owns its interceptor, safe under concurrency.
-	const upstreamFetch = (streamOptions as any).fetch ?? globalThis.fetch;
+	const upstreamFetch = options?.fetch ?? globalThis.fetch;
 	const metaFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 		const response = await upstreamFetch(input as any, init);
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -680,12 +675,11 @@ function streamHypercharm(
 		});
 	};
 
-	return streamOpenAICompletions(hyperModel, context, {
-		...streamOptions,
+	return openAICompletions.streamSimple(hyperModel, context, {
+		...options,
 		fetch: metaFetch,
-		reasoningEffort,
 		apiKey,
-	} as any);
+	});
 }
 
 // ─── Account Metadata Fetching ────────────────────────────────────────────────

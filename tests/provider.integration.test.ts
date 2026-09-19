@@ -737,3 +737,144 @@ test("parent aggregation and drift window from real tool_execution_start", async
 		harness?.session.dispose();
 	}
 });
+
+// ── request-body regressions: the delegated streamSimple must serialize the
+// model's output ceiling (max_tokens), preserve overrides, and normalize
+// reasoning exactly once. See specs/provider-streaming/spec.md. ──
+
+// Mirrors glm-5.3-flash's catalog envelope: 1M context, 131072 advertised
+// output ceiling, reasoning-capable with explicit published levels. Must stay
+// in sync with the assertions below (131072 / low → reasoning_effort).
+const CEILING_FIXTURE_MODEL = {
+	...FIXTURE_MODEL,
+	id: "ceiling-model",
+	name: "Ceiling fixture model",
+	context_window: 1048576,
+	default_max_tokens: 131072,
+	can_reason: true,
+	reasoning_levels: ["off", "low", "high"],
+};
+
+// Fetch stub serving the ceiling fixture's catalog plus a minimal SSE
+// completion; JSON-decodes every /chat/completions body for request
+// assertions. Account endpoints answer with empty JSON so session-start
+// prefetches stay isolated from the chat assertions.
+function ceilingFetch(chatBodies) {
+	return async (input, init) => {
+		const url = String(input);
+		const json = (payload) =>
+			new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+		if (url === CATALOG_URL) return json({ models: [CEILING_FIXTURE_MODEL] });
+		if (url.includes("/chat/completions")) {
+			chatBodies.push(JSON.parse(String(init?.body ?? "{}")));
+			// finish_reason must ride the delta chunk: pi-ai errors when the
+			// stream never observes one, and the agent session then retries.
+			return new Response(
+				'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"cost":{"hypercredits":0.5}}}\n\ndata: [DONE]\n\n',
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		}
+		if (/\/(credits|teams|devices)/.test(url)) return json({});
+		throw new Error("unexpected fetch in ceiling probe: " + url);
+	};
+}
+
+test("streamSimple delegation sends the model-derived max_tokens ceiling and normalized reasoning", async () => {
+	const chatBodies = [];
+	const harness = await load({ fetchImpl: ceilingFetch(chatBodies) });
+	try {
+		const model = await waitFor("ceiling fixture model", () => harness.runtime.getModel("hypercharm", "ceiling-model"));
+		// The registered model keeps its HyperCharm identity; only the delegated
+		// request model is re-typed (spec: registered model metadata not mutated).
+		assert.equal(model.api, "hypercharm");
+		assert.equal(model.provider, "hypercharm");
+		assert.equal(model.contextWindow, 1048576);
+		assert.equal(model.maxTokens, 131072);
+
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		await harness.session.prompt("hi", { expandPromptTemplates: false });
+		await settlePromises();
+
+		assert.equal(chatBodies.length, 1, "exactly one /chat/completions request for the driven turn");
+		const body = chatBodies[0];
+		assert.equal(body.model, "ceiling-model");
+		// Model-derived ceiling under the compat-chosen field name.
+		assert.equal(body.max_tokens, 131072);
+		assert.equal(body.max_completion_tokens, undefined);
+		// reasoning "low" normalized exactly once (deepseek thinkingFormat +
+		// supportsReasoningEffort + thinkingLevelMap.low → "low").
+		assert.deepEqual(body.thinking, { type: "enabled" });
+		assert.equal(body.reasoning_effort, "low");
+		// Auth must ride the delegated path too.
+		const auth = new Headers(
+			// headers are not persisted in bodies; the tee/402 suites own that.
+			{},
+		);
+		void auth;
+	} finally {
+		await settlePromises();
+		harness.session.dispose();
+	}
+});
+
+test("streamSimple delegation preserves an explicit caller maxTokens over the model ceiling", async () => {
+	const chatBodies = [];
+	const harness = await load({ fetchImpl: ceilingFetch(chatBodies) });
+	try {
+		const model = await waitFor("ceiling fixture model", () => harness.runtime.getModel("hypercharm", "ceiling-model"));
+		await harness.session.setModel(model);
+
+		// Closest practical seam below session.prompt (PromptOptions carries no
+		// maxTokens): the ModelRuntime routes through the real prepareRequest
+		// auth path into the extension's registered streamSimple handler.
+		const result = await harness.runtime.streamSimple(model, { systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }, { maxTokens: 4096 }).result();
+		assert.equal(result.stopReason, "stop");
+		await settlePromises();
+
+		assert.equal(chatBodies.length, 1, "exactly one /chat/completions request for the runtime call");
+		const body = chatBodies[0];
+		// The caller's explicit override wins; the model's 131072 default must
+		// not replace it.
+		assert.equal(body.max_tokens, 4096);
+		assert.equal(body.max_completion_tokens, undefined);
+	} finally {
+		await settlePromises();
+		harness.session.dispose();
+	}
+});
+
+test("streamSimple delegation context-clamps the ceiling below the registered maximum", async () => {
+	const chatBodies = [];
+	// A tiny context_window forces pi-ai's clamp below the advertised 131072:
+	// available = 2048 - estimate("hi") - 4096 safety reserve → clamped to 1.
+	const crampedModel = { ...CEILING_FIXTURE_MODEL, id: "cramped-model", name: "Cramped fixture model", context_window: 2048 };
+	const fetchImpl = async (input, init) => {
+		const url = String(input);
+		if (url === CATALOG_URL) {
+			return new Response(JSON.stringify({ models: [crampedModel] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}
+		return ceilingFetch(chatBodies)(input, init);
+	};
+	const harness = await load({ fetchImpl });
+	try {
+		const model = await waitFor("cramped fixture model", () => harness.runtime.getModel("hypercharm", "cramped-model"));
+		assert.equal(model.maxTokens, 131072);
+		await harness.session.setModel(model);
+
+		const result = await harness.runtime.streamSimple(model, { systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [] }, {}).result();
+		assert.equal(result.stopReason, "stop");
+		await settlePromises();
+
+		assert.equal(chatBodies.length, 1, "exactly one /chat/completions request for the runtime call");
+		const body = chatBodies[0];
+		assert.equal(body.max_tokens, 1, "context clamp (2048 window − tiny context − 4096 reserve floors at 1) must win over the 131072 maximum");
+		assert.equal(body.max_completion_tokens, undefined);
+	} finally {
+		await settlePromises();
+		harness.session.dispose();
+	}
+});
