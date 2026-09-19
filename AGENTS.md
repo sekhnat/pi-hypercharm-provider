@@ -23,7 +23,8 @@ When a model needs overrides, new properties, or corrections, edit the appropria
 | `scripts/update-models.js` | The sync script itself (edit only if changing how models are fetched/transformed). |
 | `identity.ts` | Every identifier this extension registers into a shared pi surface (provider id, custom api name, status/widget keys, command, prism entry type, auth key + env var, config/cache file names). `tests/identity.test.ts` enforces namespacing, uniqueness, and disjointness from the official `@charmland/pi-hyper-provider` — never hardcode one of these elsewhere. |
 | `notify.ts` | Deduplicated warning sink: fetch/parse failures go to the session UI once one is active, stderr before that, never thrown. |
-| `prism.ts` | Hyper routing-header validation (sanitizer + persisted-entry re-validation). Pure module — no pi imports; exercised by `tests/prism.test.ts`. |
+|`prism.ts`|Hyper routing-header validation (sanitizer + persisted-entry re-validation). Pure module — no pi imports; exercised by `tests/prism.test.ts`.|
+|`ledger.ts`|Usage-ledger core for fabric child accounting: record type (version-stamped), JSONL line serialize/parse, daily-shard date math, lineage filter, per-agent rollup, newest-wins rate-snapshot selection. Pure module — no pi imports; exercised by `tests/ledger.test.ts`.|
 
 ## Data Flow
 

@@ -48,6 +48,41 @@
  *   turn_end so the account line tracks spend live; the agent_settled poll
  *   reconciles any drift.
  *
+ * Fabric Child Accounting Mode (pi-fabric integration):
+ *   pi-fabric spawns agents (workflow workers, trajectory handoffs, persistent
+ *   actors) as separate `pi --mode rpc` children carrying a PI_FABRIC_* env
+ *   envelope (PI_FABRIC_PARENT_RUN, PI_FABRIC_MAIN_AGENT_ID lineage,
+ *   PI_FABRIC_AGENT_NAME, PI_FABRIC_ACTOR_ID/NAME). Two modes:
+ *
+ *   - Child mode (envelope present): the per-request usage tee runs as usual,
+ *     but the child makes no status-related account requests (no /credits,
+ *     /teams, /devices — no prefetch, no agent_settled poll, no 402 refresh).
+ *     At each committed turn with observed usage it appends one JSONL record
+ *     (requests, hypercredit spend, latest rate-limit snapshot, out-of-credits
+ *     flag) to the daily shard <agentDir>/cache/hypercharm-usage-YYYYMMDD.jsonl
+ *     (the shard prefix is identity.ts's LEDGER_SHARD_PREFIX; the record shape
+ *     is ledger.ts's, version-stamped). Write failures warn once, never throw.
+ *
+ *   - Parent mode: the render path reads the current and previous day's
+ *     shards (mtime-cached), filters records by its own lineage key
+ *     `session:` + session id — the same derivation fabric uses, so a
+ *     replaced session starts clean — and rolls them up per agent. The
+ *     sidebar panel gains an agent block (summary + capped per-agent rows +
+ *     overflow) after the session rows; the widget/statusbar session line
+ *     gains a compact agent atom with its own width-compaction tiers. Agent
+ *     spend counts as session activity for the show-after-activity gate.
+ *     Shards past a 7-day retention are unlinked best-effort at session start.
+ *
+ *   Drift-window reconciliation: observing a fabric_exec tool execution arms
+ *   a window whose timer (on the credits-throttle cadence, 15 s) re-reads the
+ *   ledger; new records refresh the balance within the existing throttle,
+ *   merge the newest child rate snapshot, and re-render. The window extends
+ *   on activity, disarms after 5 minutes of ledger silence, and is torn down
+ *   on session replacement via the status epoch. A record carrying the 402
+ *   flag fires the existing out-of-credits notification once per session and
+ *   forces a balance refresh. Sessions that never see fabric_exec run no
+ *   timer and make no extra calls; childless non-fabric behavior is unchanged.
+ *
  *   Unit note (observed): 20 hypercredits = $1. usage.cost.hypercredits is in
  *   the same display unit /v1/credits reports; usage.cost.usd ÷ 20 matches.
  *   usage.remaining.hypercredits is USD-denominated despite the name — we
@@ -128,6 +163,18 @@ import {
 } from "./identity";
 import { createNotifier } from "./notify";
 import { prismRouteFromHeaders, prismRouteLabel, readPrismRoute, type PrismRoute } from "./prism";
+import {
+	aggregateLineage,
+	currentShardNames,
+	EMPTY_LINEAGE_USAGE,
+	expiredShardNames,
+	LEDGER_RECORD_VERSION,
+	parseLedgerRecord,
+	serializeLedgerRecord,
+	shardFileName,
+	type LineageUsage,
+	type UsageLedgerRecord,
+} from "./ledger";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import modelsData from "./models.json" with { type: "json" };
 import customModelsData from "./custom-models.json" with { type: "json" };
@@ -150,6 +197,7 @@ import {
 	applyOptimisticSpend,
 	buildAccountTiers,
 	buildSessionLine,
+	buildSessionLineWithAgents,
 	buildSidebarPanel,
 	coerceStatusConfig,
 	DEFAULT_STATUS_CONFIG,
@@ -335,8 +383,161 @@ let pendingRequests = 0;
 let pendingSpendHc = 0;
 let pendingSawUsage = false;
 let pendingSawOutOfCredits = false;
+let pendingRateSnapshot: UsageLedgerRecord["rate"] | undefined;
 let outOfCreditsNotified = false;
 let widgetGlyphClampNotified = false;
+
+// ─── Fabric Child Accounting Mode ─────────────────────────────────────────────
+// pi-fabric spawns agents as separate `pi --mode rpc` children carrying a
+// PI_FABRIC_* env envelope. A child keeps the per-request usage tee but has no
+// UI: it appends its committed turns to the shared usage ledger (attributed to
+// the spawning session's lineage) instead of prefetching account state, and
+// the parent reads those shards back. All env reads are guarded — a fabric
+// upgrade that renames the envelope degrades to today's behavior.
+
+/** Ledger retention window (days) for parent-side GC of old shards. */
+const LEDGER_RETENTION_DAYS = 7;
+
+/** Fabric child mode: the child knows its spawning run. undefined at the top
+ * level — a non-child process never writes ledger records. */
+function fabricChildEnv(env: NodeJS.ProcessEnv = process.env): {
+	parentRun: string;
+	lineage: string;
+	agentName: string | undefined;
+	actorId: string | undefined;
+	actorName: string | undefined;
+} | undefined {
+	const parentRun = env.PI_FABRIC_PARENT_RUN;
+	const lineage = env.PI_FABRIC_MAIN_AGENT_ID;
+	if (typeof parentRun !== "string" || parentRun.length === 0) return undefined;
+	if (typeof lineage !== "string" || lineage.length === 0) return undefined;
+	const agentName = typeof env.PI_FABRIC_AGENT_NAME === "string" && env.PI_FABRIC_AGENT_NAME.length > 0 ? env.PI_FABRIC_AGENT_NAME : undefined;
+	const actorId = typeof env.PI_FABRIC_ACTOR_ID === "string" && env.PI_FABRIC_ACTOR_ID.length > 0 ? env.PI_FABRIC_ACTOR_ID : undefined;
+	const actorName = typeof env.PI_FABRIC_ACTOR_NAME === "string" && env.PI_FABRIC_ACTOR_NAME.length > 0 ? env.PI_FABRIC_ACTOR_NAME : undefined;
+	return { parentRun, lineage, agentName, actorId, actorName };
+}
+
+// Child state is read lazily (per event), not cached at module load: the env
+// envelope is process-lifetime constant, but lazy reads keep the detection
+// honest under test harnesses that set the env after module import.
+function fabricChild() {
+	return fabricChildEnv();
+}
+
+function isFabricChild(): boolean {
+	return fabricChild() !== undefined;
+}
+
+// Ledger shards live under the agent cache dir, resolved per call (not at
+// module load) so test harnesses that redirect PI_CODING_AGENT_DIR after
+// import observe a consistent world — and so a runtime agent-dir change is
+// honored the same way the models cache is not.
+function ledgerDir(): string {
+	return path.join(getAgentDir(), "cache");
+}
+let ledgerWriteWarned = false;
+
+/** Append one record as a single line to the day's shard. POSIX O_APPEND makes
+ * a single write atomic against concurrent child appenders. Write failures
+ * warn once through the notifier and never throw. */
+function appendLedgerRecord(record: UsageLedgerRecord): void {
+	try {
+		const dir = ledgerDir();
+		fs.mkdirSync(dir, { recursive: true });
+		fs.appendFileSync(path.join(dir, shardFileName(new Date(record.ts))), serializeLedgerRecord(record) + "\n");
+		ledgerWriteWarned = false;
+	} catch (err) {
+		if (!ledgerWriteWarned) {
+			ledgerWriteWarned = true;
+			notifier.warn(`Unable to append to the HyperCharm usage ledger: ${describeError(err)}.`);
+		}
+	}
+}
+
+/** Best-effort GC: unlink shards past retention at session start. Failures
+ * (including ENOENT races) are silent — removal is an optimization. */
+function gcLedgerShards(now: Date): void {
+	for (const name of expiredShardNames(now, LEDGER_RETENTION_DAYS)) {
+		try {
+			fs.unlinkSync(path.join(ledgerDir(), name));
+		} catch {
+			// Silent by design: a shard another process already removed or an
+			// unreadable directory must not break startup.
+		}
+	}
+}
+
+/** Read one shard; missing files are normal (silent), anything else warns once. */
+function readLedgerShard(name: string): UsageLedgerRecord[] {
+	const shardPath = path.join(ledgerDir(), name);
+	let content: string;
+	try {
+		content = fs.readFileSync(shardPath, "utf8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+			notifier.warn(`Unable to read the HyperCharm usage ledger shard ${name}: ${describeError(err)}.`);
+		}
+		return [];
+	}
+	const records: UsageLedgerRecord[] = [];
+	for (const line of content.split("\n")) {
+		if (line.length === 0) continue;
+		const record = parseLedgerRecord(line);
+		if (record) records.push(record);
+	}
+	return records;
+}
+
+/** mtime+size cache so the render path re-reads only shards that changed. */
+const shardReadCache = new Map<string, { mtimeMs: number; size: number; records: UsageLedgerRecord[] }>();
+
+/**
+ * Read the current and previous day's shards (mtime-cached), returning every
+ * valid record. Missing shards are silent; malformed lines warn once via the
+ * ledger module's parse contract (they are skipped, never fatal).
+ */
+function readLedgerRecords(now: Date): UsageLedgerRecord[] {
+	const records: UsageLedgerRecord[] = [];
+	for (const name of currentShardNames(now)) {
+		const shardPath = path.join(ledgerDir(), name);
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.statSync(shardPath);
+		} catch {
+			// Missing shard: a normal empty day.
+		}
+		if (!stat) continue;
+		const cached = shardReadCache.get(name);
+		if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+			records.push(...cached.records);
+			continue;
+		}
+		const shardRecords = readLedgerShard(name);
+		shardReadCache.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, records: shardRecords });
+		records.push(...shardRecords);
+	}
+	// Shards that rotated out of the read window stop being cached.
+	for (const name of [...shardReadCache.keys()]) {
+		if (!currentShardNames(now).includes(name)) shardReadCache.delete(name);
+	}
+	return records;
+}
+
+/** The parent's lineage key — the same derivation fabric uses for roots. */
+function parentLineageKey(ctx: ExtensionContext): string {
+	try {
+		return `session:${ctx.sessionManager.getSessionId()}`;
+	} catch {
+		return "";
+	}
+}
+
+/** Aggregated lineage usage for the render path (empty without a key). */
+function lineageUsageFor(ctx: ExtensionContext): LineageUsage {
+	const lineage = parentLineageKey(ctx);
+	if (lineage.length === 0) return EMPTY_LINEAGE_USAGE;
+	return aggregateLineage(readLedgerRecords(new Date()), lineage);
+}
 
 const teeReaders = new Set<Promise<void>>();
 
@@ -368,6 +569,8 @@ function captureRateLimitHeaders(headers: Headers): void {
 	};
 	if (![rate.limitHour, rate.limitDay, rate.remainingHour, rate.remainingDay].every((v) => Number.isFinite(v))) return;
 	account.rate = rate;
+	// The latest snapshot of the turn rides the child's ledger record.
+	pendingRateSnapshot = rate;
 }
 
 /** Extract spend data from a parsed completion chunk/body's usage object. */
@@ -578,6 +781,93 @@ async function refreshAccountMeta(apiKey: string | undefined, signal?: AbortSign
 	metaFetched = teams.ok && devices.ok;
 }
 
+// ─── Drift-Window Reconciliation ──────────────────────────────────────────────
+// Armed by a fabric_exec tool execution; while armed, a timer re-reads the
+// ledger on the credits-throttle cadence and refreshes the balance when child
+// records arrived. Session-scoped: torn down on session replacement via the
+// status epoch. Sessions that never observe fabric_exec run no timer here.
+
+/** Ledger silence that disarms the parent's drift window. */
+const DRIFT_WINDOW_QUIET_MS = 5 * 60_000;
+
+let driftTimer: NodeJS.Timeout | null = null;
+/** Injectable for tests; defaults to the credits-throttle cadence. Tests may
+ * shorten it via the same globalThis seam the atelier fixture uses. */
+let driftTickMs = CREDITS_MIN_INTERVAL_MS;
+const driftTickOverride = (globalThis as { __hypercharmDriftTickMs?: unknown }).__hypercharmDriftTickMs;
+if (typeof driftTickOverride === "number" && Number.isFinite(driftTickOverride) && driftTickOverride > 0) {
+	driftTickMs = driftTickOverride;
+}
+
+function stopDriftWindow(): void {
+	if (driftTimer !== null) {
+		clearInterval(driftTimer);
+		driftTimer = null;
+	}
+}
+
+function armDriftWindow(ctx: ExtensionContext): void {
+	if (isFabricChild() || statusConfig.account === "off" || driftTimer !== null) return;
+	const epoch = statusEpoch;
+	const armedAt = Date.now();
+	let lastRecordCount = -1;
+	let lastSeenSpend: number | null = null;
+	driftTimer = setInterval(() => {
+		if (epoch !== statusEpoch) {
+			stopDriftWindow();
+			return;
+		}
+		try {
+			const usage = lineageUsageFor(ctx);
+			if (usage.summary.agents === 0) {
+				// No records for this lineage yet; nothing to watch. The window
+				// stays armed until the quiet period measured from the latest
+				// record (or arm time) elapses.
+				if (usage.latestTs === undefined && Date.now() - armedAt > DRIFT_WINDOW_QUIET_MS) {
+					stopDriftWindow();
+				}
+				return;
+			}
+			const hadNewRecords =
+				usage.summary.requests !== lastRecordCount || usage.summary.spendHc !== lastSeenSpend;
+			if (hadNewRecords) {
+				lastRecordCount = usage.summary.requests;
+				lastSeenSpend = usage.summary.spendHc;
+				// Throttled refresh: new child spend moves the balance within the
+				// existing credits cadence, no forced call.
+				void refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false).then(() =>
+					updateStatus(ctx),
+				);
+			}
+			if (usage.latestRate && (!account.rate || usage.latestRate.capturedAt >= account.rate.capturedAt)) {
+				// Merge the newest child-observed snapshot into account state
+				// (newest-wins by capturedAt; field validation happened at parse).
+				account.rate = usage.latestRate;
+			}
+			if (usage.outOfCredits && !outOfCreditsNotified) {
+				outOfCreditsNotified = true;
+				if (ctx.hasUI) {
+					try {
+						ctx.ui.notify("HyperCharm is out of Hypercredits — recharge at hyper.charm.land", "error");
+					} catch (err) {
+						if (!isStaleCtxError(err)) throw err;
+					}
+				}
+				void refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, true).then(() => updateStatus(ctx));
+			}
+			if (usage.latestTs !== undefined && Date.now() - usage.latestTs > DRIFT_WINDOW_QUIET_MS) {
+				stopDriftWindow();
+				updateStatus(ctx);
+				return;
+			}
+			updateStatus(ctx);
+		} catch (err) {
+			if (!isStaleCtxError(err)) throw err;
+		}
+	}, driftTickMs);
+	driftTimer.unref?.();
+}
+
 // ─── Status Rendering ─────────────────────────────────────────────────────────
 
 
@@ -649,6 +939,15 @@ function renderStatus(ctx: ExtensionContext): void {
 	}
 
 	const hasActivity = sessionStats.requests > 0 || sessionStats.spendHc > 0;
+	// Lineage aggregation (fabric children's committed turns). Reads the
+	// current+previous day's shards with an mtime cache — cheap enough for
+	// every render trigger, no new event subscriptions needed.
+	const lineage = lineageUsageFor(ctx);
+	const hasAgentUsage = lineage.summary.agents > 0;
+	// Agent spend counts as session activity: a session whose fabric children
+	// spend while it idles still renders its session line (and becomes
+	// eligible for the account line) instead of staying hidden.
+	const hasAnyActivity = hasActivity || hasAgentUsage;
 	// Legacy terminals measure these glyphs with their own cell tables; the
 	// widget clamps to ASCII there, the statusbar keeps the explicit choice.
 	const glyphs = resolveGlyphSet(statusConfig.glyphs);
@@ -661,12 +960,22 @@ function renderStatus(ctx: ExtensionContext): void {
 	// Show only after HyperCharm activity this session (like pi-neuralwatt):
 	// no empty-gap line on fresh sessions, no stale account glare on other
 	// providers' sessions.
-	const accountVisible = statusConfig.account !== "off" && accountHasData(account) && hasActivity;
+	const accountVisible = statusConfig.account !== "off" && accountHasData(account) && hasAnyActivity;
 	const lowBalance =
 		statusConfig.lowBalanceHc !== null && account.balance !== null && account.balance <= statusConfig.lowBalanceHc;
-	const sessionLine = statusConfig.session !== "off" ? buildSessionLine(sessionStats, glyphs) : undefined;
+	const sessionLine =
+		statusConfig.session !== "off" ? buildSessionLineWithAgents(sessionStats, lineage, glyphs) : undefined;
+	// Width-compaction tiers for the widget path: the agent atom compresses to
+	// count-only and drops before the session's own atoms as space runs out.
+	const atomHasSpend = lineage.summary.spendHc > 0;
+	const sessionLineFull =
+		statusConfig.session !== "off" ? buildSessionLineWithAgents(sessionStats, lineage, glyphs, "full") : undefined;
+	const sessionLineCount =
+		statusConfig.session !== "off" ? buildSessionLineWithAgents(sessionStats, lineage, glyphs, "count") : undefined;
+	const sessionLineNone =
+		statusConfig.session !== "off" ? buildSessionLineWithAgents(sessionStats, lineage, glyphs, "none") : undefined;
 	const accTiers = accountVisible ? buildAccountTiers(account, lowBalance, glyphs, { hideAuthExpiry: statusConfig.hideAuthExpiry }) : [];
-	const sessionLineW = widgetClamped && statusConfig.session !== "off" ? buildSessionLine(sessionStats, widgetGlyphs) : sessionLine;
+	const sessionLineW = widgetClamped && statusConfig.session !== "off" ? sessionLineFull : sessionLine;
 	const accTiersW =
 		widgetClamped && accountVisible ? buildAccountTiers(account, lowBalance, widgetGlyphs, { hideAuthExpiry: statusConfig.hideAuthExpiry }) : accTiers;
 
@@ -689,6 +998,7 @@ function renderStatus(ctx: ExtensionContext): void {
 		account,
 		lowBalance,
 		hideAuthExpiry: statusConfig.hideAuthExpiry,
+		lineage,
 	}, glyphs);
 	if (panel.publish) {
 		publisher().update({
@@ -717,25 +1027,29 @@ function renderStatus(ctx: ExtensionContext): void {
 
 	// Below-editor widget (two-zone, width-aware). Sidebar parts route here as
 	// their fallback when no compatible host is present; a sidebar part with a
-	// compatible host must not duplicate into the widget.
-	const leftW =
-		statusConfig.session === "widget" || (statusConfig.session === "sidebar" && !sidebarCompatible)
-			? sessionLineW
-			: undefined;
+	// compatible host must not duplicate into the widget. The left side keeps
+	// progressive agent-atom compaction: full atom → count-only → session's
+	// own atoms only — the StatusLineWidget picks the first that fits.
+	const widgetWantsSession =
+		statusConfig.session === "widget" || (statusConfig.session === "sidebar" && !sidebarCompatible);
+	const leftW = widgetWantsSession ? sessionLineW : undefined;
+	const leftTiers = widgetWantsSession
+		? [sessionLineFull, sessionLineCount, sessionLineNone].filter((s): s is string => s !== undefined)
+		: [];
 	const rightW =
 		(statusConfig.account === "widget" || (statusConfig.account === "sidebar" && !sidebarCompatible)) &&
 		accountVisible
 			? accTiersW
 			: undefined;
-	if (leftW !== undefined || (rightW !== undefined && rightW.length > 0)) {
+	if (leftTiers.length > 0 || (rightW !== undefined && rightW.length > 0)) {
 		ctx.ui.setWidget(
 			WIDGET_KEY,
-			(_tui: any, theme: any) => new StatusLineWidget(theme, leftW ?? "", rightW ?? [], lowBalance, widgetGlyphs),
+			(_tui: any, theme: any) => new StatusLineWidget(theme, leftTiers, rightW ?? [], lowBalance, widgetGlyphs),
 			{ placement: "belowEditor" },
 		);
-} else {
+	} else {
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
-}
+	}
 }
 
 function resetStatusState(): void {
@@ -746,9 +1060,13 @@ function resetStatusState(): void {
 	pendingSpendHc = 0;
 	pendingSawUsage = false;
 	pendingSawOutOfCredits = false;
+	pendingRateSnapshot = undefined;
 	outOfCreditsNotified = false;
 	lastCreditsFetchAt = 0;
 	metaFetched = false;
+	// A replaced session's drift window dies with its epoch on the next tick;
+	// stopping here keeps the old timer from observing a fresh session's key.
+	stopDriftWindow();
 }
 
 /** Commit per-turn pending capture into session state (after tees settle). */
@@ -762,6 +1080,31 @@ function commitPending(ctx: ExtensionContext): void {
 	// overwrites account.balance (never adjusts), so this cannot
 	// double-count; the agent_settled poll reconciles any drift.
 	applyOptimisticSpend(account, pendingSpendHc);
+
+	// Fabric children report their committed spend to the shared ledger (one
+	// single-line append per turn); the parent-side account refreshes below
+	// are skipped — the out-of-credits fact travels in the record instead.
+	const child = fabricChild();
+	if (child !== undefined) {
+		const record: UsageLedgerRecord = {
+			v: LEDGER_RECORD_VERSION,
+			lineage: child.lineage,
+			agentId: child.actorId ?? child.parentRun,
+			agentName: child.actorName ?? child.agentName ?? child.parentRun,
+			ts: Date.now(),
+			requests: pendingRequests,
+			spendHc: pendingSpendHc,
+			...(pendingRateSnapshot ? { rate: pendingRateSnapshot } : {}),
+			...(pendingSawOutOfCredits ? { outOfCredits: true } : {}),
+		};
+		appendLedgerRecord(record);
+		pendingRequests = 0;
+		pendingSpendHc = 0;
+		pendingSawUsage = false;
+		pendingSawOutOfCredits = false;
+		pendingRateSnapshot = undefined;
+		return;
+	}
 
 	pendingRequests = 0;
 	pendingSpendHc = 0;
@@ -1051,6 +1394,8 @@ export default function (pi: ExtensionAPI) {
 
 		loadStatusConfig();
 		resetStatusState();
+		// Parent-side GC of shards past retention (best-effort, silent).
+		if (!isFabricChild()) gcLedgerShards(new Date());
 		updateStatus(ctx); // clears carryover; publishes the panel when a HyperCharm model is active
 		// Re-register so our identity (custom api + streamSimple) always wins
 		// over anything that touched provider registration during load.
@@ -1070,25 +1415,50 @@ export default function (pi: ExtensionAPI) {
 			// Prefetch credits/team metadata only when a HyperCharm model is active
 			// (pi-neuralwatt also prefetches so the first turn ends with data, but
 			// gating here avoids API calls in sessions that never use the provider).
-			if (currentProviderId(ctx) === PROVIDER_ID) {
+			// Fabric children skip all of it: no UI to show it and the ledger
+			// record carries the account facts home.
+			if (!isFabricChild() && currentProviderId(ctx) === PROVIDER_ID) {
 				updateStatusAfter(refreshCredits(cachedApiKey, statusSignal, true), ctx);
 				updateStatusAfter(refreshAccountMeta(cachedApiKey, statusSignal), ctx);
 			}
-			revalidateModels(cachedApiKey, embeddedModels, signal).then((freshBase) => {
-				if (freshBase && epoch === statusEpoch && !signal.aborted) {
-					currentModels = buildModels(freshBase, customModels, patches, deprecated);
-					pi.registerProvider(PROVIDER_ID, makeProviderConfig());
-				}
-			});
+			revalidateModels(cachedApiKey, embeddedModels, signal)
+				.catch((err) => {
+					// A session disposed (not replaced) mid-refresh invalidates the
+					// runtime without bumping the epoch; a late hot-swap must not
+					// reject unhandled. Same contract as updateStatus's stale guard.
+					if (!isStaleCtxError(err)) {
+						notifier.warn(`HyperCharm model catalog refresh failed: ${describeError(err)} — serving cached/embedded models.`);
+					}
+				})
+				.then((freshBase) => {
+					if (freshBase && epoch === statusEpoch && !signal.aborted) {
+						currentModels = buildModels(freshBase, customModels, patches, deprecated);
+						pi.registerProvider(PROVIDER_ID, makeProviderConfig());
+					}
+				})
+				.catch((err) => {
+					if (!isStaleCtxError(err)) throw err;
+				});
 		});
 	});
 
 	pi.on("model_select", (event, ctx) => {
 		updateStatus(ctx);
 		const model: any = (event as any).model;
-		if (model?.provider === PROVIDER_ID && cachedApiKey) {
+		// Child mode: no account prefetches (see session_start).
+		if (!isFabricChild() && model?.provider === PROVIDER_ID && cachedApiKey) {
 			updateStatusAfter(refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false), ctx);
 			void refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
+		}
+	});
+
+	// fabric_exec observed: a fabric agent is about to run under this session.
+	// Arm the drift window so the account line tracks the children's ledger
+	// records while they work. Zero timers/calls for sessions that never see
+	// one, and none in child mode (children don't spawn fabric agents).
+	pi.on("tool_execution_start", (event, ctx) => {
+		if ("toolName" in event && event.toolName === "fabric_exec") {
+			armDriftWindow(ctx);
 		}
 	});
 
@@ -1098,7 +1468,8 @@ export default function (pi: ExtensionAPI) {
 		commitPending(ctx);
 		// If the session_start/model_select credits fetch raced or failed, retry
 		// once we have real activity so the very first turn shows the balance.
-		if (sessionStats.requests > 0 && account.balance === null) {
+		// Child mode never fetches account state (the record carries the facts).
+		if (!isFabricChild() && sessionStats.requests > 0 && account.balance === null) {
 			await refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false);
 		}
 		updateStatus(ctx);
@@ -1107,8 +1478,10 @@ export default function (pi: ExtensionAPI) {
 	// agent_settled (not agent_end): fires only when no automatic retry,
 	// compaction, or queued continuation can follow — the one moment polling
 	// /v1/credits is both fresh and not redundant. Gated on session activity
-	// so sessions without HyperCharm turns make zero API calls here.
+	// so sessions without HyperCharm turns make zero API calls here. Child
+	// mode never polls: no UI, and the parent reconciles from the ledger.
 	pi.on("agent_settled", async (_event, ctx) => {
+		if (isFabricChild()) return;
 		if (sessionStats.requests > 0 || sessionStats.spendHc > 0) {
 			await refreshCredits(cachedApiKey, statusAbort?.signal ?? undefined, false);
 			if (!metaFetched) await refreshAccountMeta(cachedApiKey, statusAbort?.signal ?? undefined);
@@ -1119,6 +1492,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event, ctx) => {
 		revalidateAbort?.abort();
 		statusAbort?.abort();
+		stopDriftWindow();
 		ctx.ui.setStatus(STATUS_KEY_SESSION, undefined);
 		ctx.ui.setStatus(STATUS_KEY_ACCOUNT, undefined);
 		ctx.ui.setWidget(WIDGET_KEY, undefined);

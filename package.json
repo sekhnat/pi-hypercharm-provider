@@ -9,7 +9,7 @@
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit && npm run smoke && npm test",
     "smoke": "node tests/status.smoke.ts && bun run tests/sidebar-publish.smoke.ts && node tests/models.smoke.ts && node tests/oauth.smoke.ts && node tests/update-models.smoke.ts && node tests/sidebar.smoke.ts && bun run tests/routing.smoke.ts",
-    "test": "node --import jiti/register --test tests/identity.test.ts tests/prism.test.ts tests/notify.test.ts tests/provider.integration.test.ts",
+    "test": "node --import jiti/register --test tests/identity.test.ts tests/ledger.test.ts tests/prism.test.ts tests/notify.test.ts tests/provider.integration.test.ts",
     "update-models": "node scripts/update-models.js"
   },
   "keywords": [

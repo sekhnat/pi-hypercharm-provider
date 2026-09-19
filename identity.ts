@@ -29,6 +29,14 @@ export const CONFIG_FILE_NAME = `${PROVIDER_ID}.json`;
 export const CACHE_FILE_NAME = `${PROVIDER_ID}-models.json`;
 
 /**
+ * Daily usage-ledger shard prefix. Children of pi-fabric append usage records
+ * to `<agentDir>/cache/<LEDGER_SHARD_PREFIX>-YYYYMMDD.jsonl`; the spawning
+ * parent reads those shards back. Namespaced so co-installation with the
+ * official provider can never collide on the shared cache directory.
+ */
+export const LEDGER_SHARD_PREFIX = `${PROVIDER_ID}-usage`;
+
+/**
  * Every distinct namespaced identifier this extension registers or writes.
  * API_NAME and WIDGET_KEY alias PROVIDER_ID by design — pi keys the custom api
  * handler and the below-editor widget by provider id — so the set is deduped;
@@ -45,5 +53,6 @@ export const IDENTIFIERS: readonly string[] = Object.freeze([
 		PRISM_ENTRY_TYPE,
 		CONFIG_FILE_NAME,
 		CACHE_FILE_NAME,
+		LEDGER_SHARD_PREFIX,
 	]),
 ]);

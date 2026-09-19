@@ -31,6 +31,13 @@ export type DisplayMode = "sidebar" | "widget" | "statusbar" | "off";
 
 export type GlyphMode = "auto" | "unicode" | "ascii";
 
+/** Structural view of the ledger aggregation consumed by the agent builders
+ * (the subset of ledger.ts's LineageUsage the display needs). */
+export type LineageUsageView = {
+	summary: { requests: number; spendHc: number; agents: number };
+	entries: Array<{ id: string; name: string; requests: number; spendHc: number }>;
+};
+
 export interface GlyphSet {
 	bolt: string;
 	gem: string;
@@ -38,10 +45,13 @@ export interface GlyphSet {
 	auth: string;
 	sep: string;
 	ellipsis: string;
+	agent: string;
+	/** Per-agent row marker (a sub-item of the agent block). */
+	agentRow: string;
 }
 
-export const UNICODE_GLYPHS: GlyphSet = { bolt: "⚡", gem: "◆", warn: "⚠", auth: "⟳", sep: "·", ellipsis: "…" };
-export const ASCII_GLYPHS: GlyphSet = { bolt: "*", gem: "+", warn: "!", auth: "~", sep: "-", ellipsis: "..." };
+export const UNICODE_GLYPHS: GlyphSet = { bolt: "⚡", gem: "◆", warn: "⚠", auth: "⟳", sep: "·", ellipsis: "…", agent: "⌁", agentRow: "▸" };
+export const ASCII_GLYPHS: GlyphSet = { bolt: "*", gem: "+", warn: "!", auth: "~", sep: "-", ellipsis: "...", agent: "+", agentRow: ">" };
 
 /** True for terminals whose cell-width tables are known to disagree with the
  * width math below (older mintty/Cygwin builds). */
@@ -215,6 +225,73 @@ export function buildSessionLine(stats: SessionStats, glyphs: GlyphSet = UNICODE
 	return `${glyphs.bolt} ${formatSpendHc(stats.spendHc)} hc ${glyphs.sep} ${stats.requests} req`;
 }
 
+/**
+ * Session line with the fabric agent atom (glyph, lineage spend, agent count)
+ * appended after the session's own atoms when aggregation yields agents. The
+ * caller picks the compaction tier: "full" carries spend + count, "count"
+ * only the agent count, "none" drops the atom — under width pressure the
+ * agent atom compresses and drops before the session's own atoms.
+ */
+export function buildSessionLineWithAgents(
+	stats: SessionStats,
+	lineage: LineageUsageView | undefined,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+	atomTier: "full" | "count" | "none" = "full",
+): string | undefined {
+	const base = buildSessionLine(stats, glyphs);
+	const atomTiers = buildAgentAtomTiers(lineage, glyphs);
+	const atom = atomTier === "none" ? undefined : atomTiers[atomTier === "count" ? 1 : 0];
+	if (!base) return atom;
+	if (!atom) return base;
+	return `${base} ${atom}`;
+}
+
+// ─── Agent usage (fabric lineage aggregation) ────────────────────────────────
+
+/** Max per-agent rows rendered in the sidebar before the overflow row. */
+export const AGENT_ROWS_MAX = 4;
+
+/** How many agents the overflow row names ("+N more agents"). */
+export function agentOverflowCount(entryCount: number): number {
+	return Math.max(0, entryCount - AGENT_ROWS_MAX);
+}
+
+/**
+ * Sidebar agent block: a summary row (glyph, lineage spend, requests, agent
+ * count) plus up to ${AGENT_ROWS_MAX} per-agent rows sorted by spend
+ * descending, then one overflow row when more agents exist. Undefined input
+ * or zero agents render nothing — agent rows exist only when aggregated
+ * records exist. The summary compacts "requests" to "req" so the realistic
+ * worst case stays inside the ~24 usable columns of the 28-column sidebar
+ * minimum (the same budget the meter rows were sized for).
+ */
+export function buildAgentSidebarRows(
+	lineage: { summary: { requests: number; spendHc: number; agents: number }; entries: Array<{ name: string; requests: number; spendHc: number }> } | undefined,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+): SidebarRow[] {
+	if (!lineage || lineage.summary.agents <= 0) return [];
+	const { requests, spendHc, agents } = lineage.summary;
+	const rows: SidebarRow[] = [{ text: `${glyphs.agent} ${formatSpendHc(spendHc)} hc ${glyphs.sep} ${requests} req ${glyphs.sep} ${agents} ag`, role: "muted" }];
+	const sorted = [...lineage.entries].sort((a, b) => b.spendHc - a.spendHc);
+	for (const entry of sorted.slice(0, AGENT_ROWS_MAX)) {
+		rows.push({ text: `${glyphs.agentRow} ${entry.name}  ${formatSpendHc(entry.spendHc)} hc ${glyphs.sep} ${entry.requests} req`, role: "muted" });
+	}
+	const overflow = agentOverflowCount(sorted.length);
+	if (overflow > 0) rows.push({ text: `+${overflow} more agents`, role: "dim" });
+	return rows;
+}
+
+/** Session-line atom forms, richest first: full → count-only → dropped. */
+export function buildAgentAtomTiers(
+	lineage: { summary: { spendHc: number; agents: number } } | undefined,
+	glyphs: GlyphSet = UNICODE_GLYPHS,
+): string[] {
+	if (!lineage || lineage.summary.agents <= 0) return [];
+	const full = `${glyphs.agent} ${formatSpendHc(lineage.summary.spendHc)} hc ${glyphs.sep} ${lineage.summary.agents} ag`;
+	const countOnly = `${glyphs.agent} ${lineage.summary.agents} ag`;
+	return full !== countOnly ? [full, countOnly] : [full];
+}
+
 export function accountHasData(acc: AccountState): boolean {
 	return acc.balance !== null || acc.teamName !== null || acc.rate !== null;
 }
@@ -356,13 +433,16 @@ export function buildSidebarRows(
 	acc: AccountState,
 	lowBalance: boolean,
 	glyphs: GlyphSet = UNICODE_GLYPHS,
-	opts: AccountRenderOptions = {},
+	opts: AccountRenderOptions & { lineage?: LineageUsageView } = {},
 ): SidebarRow[] {
 	const rows: SidebarRow[] = [];
 	const sessionLine = buildSessionLine(stats, glyphs);
 	if (sessionLine) rows.push({ text: sessionLine, role: "muted" });
+	// Agent block: after the session row, before the account divider — only
+	// when aggregation yields agents; callers gate on the display mode.
+	rows.push(...buildAgentSidebarRows(opts.lineage, glyphs));
 	const accountRows = buildAccountSidebarRows(acc, lowBalance, glyphs, opts);
-	if (sessionLine && accountRows.length > 0) rows.push(SIDEBAR_DIVIDER_ROW);
+	if ((sessionLine || rows.length > 0) && accountRows.length > 0) rows.push(SIDEBAR_DIVIDER_ROW);
 	rows.push(...accountRows);
 	return rows;
 }
@@ -387,6 +467,8 @@ export interface SidebarPanelOptions {
 	lowBalance: boolean;
 	/** Omit the OAuth device-session expiry atom from the account rows. */
 	hideAuthExpiry?: boolean;
+	/** Fabric lineage aggregation; agent rows render only when it yields agents. */
+	lineage?: LineageUsageView;
 }
 
 export interface SidebarPanelDecision {
@@ -406,7 +488,7 @@ export interface SidebarPanelDecision {
  * buildSidebarRows, so their metrics never render here.
  */
 export function buildSidebarPanel(options: SidebarPanelOptions, glyphs: GlyphSet = UNICODE_GLYPHS): SidebarPanelDecision {
-	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance, hideAuthExpiry } =
+	const { compatible, isProviderActive, sessionMode, accountMode, sessionStats, account, lowBalance, hideAuthExpiry, lineage } =
 		options;
 	if (!compatible || !isProviderActive) return { publish: false, rows: [] };
 	if (sessionMode !== "sidebar" && accountMode !== "sidebar") return { publish: false, rows: [] };
@@ -415,7 +497,7 @@ export function buildSidebarPanel(options: SidebarPanelOptions, glyphs: GlyphSet
 		accountMode === "sidebar" ? account : EMPTY_ACCOUNT,
 		lowBalance,
 		glyphs,
-		{ hideAuthExpiry },
+		{ hideAuthExpiry, lineage: sessionMode === "sidebar" ? lineage : undefined },
 	);
 	if (rows.length === 0) {
 		rows.push({ text: SIDEBAR_PLACEHOLDER_ROW, role: "muted" });
@@ -515,13 +597,18 @@ export interface LineTheme {
 export class StatusLineWidget {
 	private theme: LineTheme;
 	private leftRaw: string;
+	private leftTiers: string[];
 	private rightTiers: string[];
 	private rightWarn: boolean;
 	private glyphs: GlyphSet;
 
-	constructor(theme: LineTheme, leftRaw: string, rightTiers: string[] = [], rightWarn = false, glyphs: GlyphSet = UNICODE_GLYPHS) {
+	constructor(theme: LineTheme, left: string | string[], rightTiers: string[] = [], rightWarn = false, glyphs: GlyphSet = UNICODE_GLYPHS) {
 		this.theme = theme;
-		this.leftRaw = leftRaw;
+		// The left side carries its own compaction tiers (agent atom compressed
+		// and dropped first); a bare string is a single-tier line. Tiers must be
+		// ordered richest-first; the widest is the "leftRaw" identity.
+		this.leftTiers = Array.isArray(left) ? left : [left];
+		this.leftRaw = this.leftTiers[0] ?? "";
 		this.rightTiers = rightTiers;
 		this.rightWarn = rightWarn;
 		this.glyphs = glyphs;
@@ -534,13 +621,21 @@ export class StatusLineWidget {
 		// pending wrap on legacy terminals, and any real-vs-table width
 		// disagreement then scrolls the frame and desyncs pi's row bookkeeping.
 		const w = Math.max(1, width - 1);
-		const leftVis = termVisWidth(this.leftRaw);
+		// Left compaction first: the first left tier that leaves the right side
+		// something (or fits alone when there is no right side).
+		let leftRaw = this.leftRaw;
+		for (const tier of this.leftTiers) {
+			leftRaw = tier;
+			const leftVis = termVisWidth(tier);
+			if (this.rightTiers.length === 0 || leftVis <= w - 8) break;
+		}
+		const leftVis = termVisWidth(leftRaw);
 		if (leftVis > w) {
-			return [this.theme.fg("dim", truncateAnsi(this.leftRaw, w, this.glyphs.ellipsis))];
+			return [this.theme.fg("dim", truncateAnsi(leftRaw, w, this.glyphs.ellipsis))];
 		}
 
 		const rightColor = this.rightWarn ? "warning" : "dim";
-		const themedLeft = this.theme.fg("dim", this.leftRaw);
+		const themedLeft = this.theme.fg("dim", leftRaw);
 		const budget = w - leftVis - 1;
 
 		for (const tier of this.rightTiers) {

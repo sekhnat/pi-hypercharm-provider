@@ -12,10 +12,14 @@ import {
 	ASCII_GLYPHS,
 	UNICODE_GLYPHS,
 	accountHasData,
+	agentOverflowCount,
 	applyOptimisticSpend,
 	buildAccountTiers,
 	buildAccountSidebarRows,
+	buildAgentAtomTiers,
+	buildAgentSidebarRows,
 	buildRateMeter,
+	buildSessionLineWithAgents,
 	buildSidebarPanel,
 	buildSidebarRows,
 	buildSessionLine,
@@ -32,8 +36,14 @@ import {
 	termVisWidth,
 	truncateAnsi,
 	type AccountState,
+	type LineageUsageView,
 	type SidebarRow,
 } from "../status.ts";
+
+const EMPTY_LINEAGE_VIEW: LineageUsageView = {
+	summary: { requests: 0, spendHc: 0, agents: 0 },
+	entries: [],
+};
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const fakeTheme = { fg: (_c: string, t: string) => `\x1b[2m${t}\x1b[39m` };
 
@@ -297,6 +307,142 @@ assert.equal(coerceStatusConfig({ lowBalanceHc: 42 }).lowBalanceHc, 42);
 assert.equal(coerceStatusConfig({ lowBalanceHc: false }).lowBalanceHc, null);
 assert.deepEqual(coerceStatusConfig(null).session, "sidebar");
 assert.deepEqual(coerceStatusConfig({ session: "sidebar", account: "sidebar" }).session, "sidebar");
+
+// ── agent usage builders (fabric lineage aggregation) ──
+{
+	const lineage = {
+		summary: { requests: 57, spendHc: 12.4, agents: 3 },
+		entries: [
+			{ id: "run-1", name: "map-persistence", requests: 12, spendHc: 4.2 },
+			{ id: "actor-a", name: "librarian", requests: 30, spendHc: 6.0 },
+			{ id: "run-3", name: "third", requests: 15, spendHc: 2.2 },
+		],
+	};
+	// Sidebar block: summary row + per-agent rows sorted by spend desc.
+	const rows = buildAgentSidebarRows(lineage);
+	assert.deepEqual(rows[0], { text: "⌁ 12.4 hc · 57 req · 3 ag", role: "muted" });
+	assert.deepEqual(
+		rows.slice(1).map((r) => r.text),
+		["▸ librarian  6 hc · 30 req", "▸ map-persistence  4.2 hc · 12 req", "▸ third  2.2 hc · 15 req"],
+	);
+	// ASCII purity: agent and per-agent glyphs degrade ("+" / ">").
+	const asciiRows = buildAgentSidebarRows(lineage, ASCII_GLYPHS);
+	assert.ok(asciiRows[0].text.startsWith("+ "), "ASCII agent glyph");
+	for (const row of asciiRows) {
+		assert.equal([...row.text].every((c) => c.charCodeAt(0) < 128), true, `non-ASCII agent row: ${row.text}`);
+	}
+	// Overflow: six agents → four rows + one overflow row naming the remaining two.
+	const six = {
+		summary: { requests: 60, spendHc: 20, agents: 6 },
+		entries: [1, 2, 3, 4, 5, 6].map((n) => ({ id: `a${n}`, name: `agent-${n}`, requests: n, spendHc: n })),
+	};
+	const overflowRows = buildAgentSidebarRows(six);
+	assert.equal(overflowRows.length, 1 + 4 + 1);
+	assert.deepEqual(overflowRows.at(-1), { text: "+2 more agents", role: "dim" });
+	assert.deepEqual(
+		overflowRows.slice(1, 5).map((r) => r.text.split(" ")[1]),
+		["agent-6", "agent-5", "agent-4", "agent-3"],
+		"spend-descending order",
+	);
+	// Exactly four agents → no overflow row.
+	assert.equal(buildAgentSidebarRows({ ...six, entries: six.entries.slice(0, 4), summary: { ...six.summary, agents: 4 } }).length, 5);
+	// No aggregation or zero agents → no rows on any surface.
+	assert.deepEqual(buildAgentSidebarRows(undefined), []);
+	assert.deepEqual(buildAgentSidebarRows(EMPTY_LINEAGE_VIEW), []);
+	assert.deepEqual(buildAgentAtomTiers(undefined), []);
+	assert.deepEqual(buildAgentAtomTiers(EMPTY_LINEAGE_VIEW), []);
+	// Sidebar row budget: 24 visible columns at the 28-column sidebar minimum.
+	for (const row of buildAgentSidebarRows(six)) {
+		assert.ok(termVisWidth(row.text) <= 24, `agent row exceeds 24 columns: ${row.text}`);
+	}
+	// Atom tiers: full → count-only; absent when no agents.
+	assert.deepEqual(buildAgentAtomTiers(lineage), ["⌁ 12.4 hc · 3 ag", "⌁ 3 ag"]);
+	// Session line: atom appended after the session's own atoms.
+	assert.equal(
+		buildSessionLineWithAgents({ requests: 7, spendHc: 1.24 }, lineage),
+		"⚡ 1.24 hc · 7 req ⌁ 12.4 hc · 3 ag",
+	);
+	// Count-only tier compresses to glyph + count.
+	assert.equal(
+		buildSessionLineWithAgents({ requests: 7, spendHc: 1.24 }, lineage, UNICODE_GLYPHS, "count"),
+		"⚡ 1.24 hc · 7 req ⌁ 3 ag",
+	);
+	// Dropping the atom restores the plain session line exactly.
+	assert.equal(buildSessionLineWithAgents({ requests: 7, spendHc: 1.24 }, lineage, UNICODE_GLYPHS, "none"), "⚡ 1.24 hc · 7 req");
+	// Agent-only activity: the atom alone renders a session line.
+	assert.equal(buildSessionLineWithAgents(EMPTY_SESSION_STATS, lineage), "⌁ 12.4 hc · 3 ag");
+	assert.equal(buildSessionLineWithAgents(EMPTY_SESSION_STATS, undefined), undefined);
+	// ASCII end-to-end.
+	assert.equal(
+		buildSessionLineWithAgents({ requests: 7, spendHc: 1.24 }, lineage, ASCII_GLYPHS),
+		"* 1.24 hc - 7 req + 12.4 hc - 3 ag",
+	);
+}
+
+// ── agent block wiring: panel placement + session-line compaction ──
+{
+	const lineage = {
+		summary: { requests: 57, spendHc: 12.4, agents: 3 },
+		entries: [
+			{ id: "run-1", name: "map-persistence", requests: 12, spendHc: 4.2 },
+			{ id: "actor-a", name: "librarian", requests: 30, spendHc: 6.0 },
+			{ id: "run-3", name: "third", requests: 15, spendHc: 2.2 },
+		],
+	};
+	const base = {
+		compatible: true,
+		isProviderActive: true,
+		sessionMode: "sidebar" as const,
+		accountMode: "sidebar" as const,
+		sessionStats: { requests: 7, spendHc: 1.24 },
+		account: acc({ balance: 249 }),
+		lowBalance: false,
+		lineage,
+	};
+
+	// Agent block sits after the session row and before the divider/account block.
+	const panel = buildSidebarPanel(base);
+	assert.deepEqual(panel.rows, [
+		{ text: "⚡ 1.24 hc · 7 req", role: "muted" },
+		{ text: "⌁ 12.4 hc · 57 req · 3 ag", role: "muted" },
+		{ text: "▸ librarian  6 hc · 30 req", role: "muted" },
+		{ text: "▸ map-persistence  4.2 hc · 12 req", role: "muted" },
+		{ text: "▸ third  2.2 hc · 15 req", role: "muted" },
+		SIDEBAR_DIVIDER_ROW,
+		{ text: "◆ 249 hc", role: "ready" },
+	]);
+
+	// session=off hides agent rows entirely, even with lineage records.
+	const off = buildSidebarPanel({ ...base, sessionMode: "off" as const, sessionStats: EMPTY_SESSION_STATS });
+	assert.equal(off.publish, true, "account part still publishes");
+	assert.deepEqual(off.rows, [{ text: "◆ 249 hc", role: "ready" }]);
+
+	// Each metric lands in exactly one destination: with the session part routed
+	// away from the sidebar, no session or agent rows appear there.
+	const sessionWidget = buildSidebarPanel({ ...base, sessionMode: "widget" as const });
+	assert.deepEqual(sessionWidget.rows.filter((r) => r.text.includes("req")).length, 0, "no session/agent rows when session targets the widget");
+
+	// Agent-only activity (no own spend): panel shows only the agent block.
+	const agentOnly = buildSidebarPanel({ ...base, sessionStats: EMPTY_SESSION_STATS });
+	assert.deepEqual(
+		agentOnly.rows.slice(0, 2),
+		[{ text: "⌁ 12.4 hc · 57 req · 3 ag", role: "muted" }, { text: "▸ librarian  6 hc · 30 req", role: "muted" }],
+	);
+
+	// Widget: agent atom joins the session line; the width−1 rule holds across
+	// widths with the atom present (the compaction tiers only shrink the line).
+	const withAtom = buildSessionLineWithAgents(base.sessionStats, lineage)!;
+	const accountTiers = buildAccountTiers(acc({ balance: 249 }), false);
+	for (const width of [80, 60, 46, 40, 34, 30]) {
+		const rendered = new StatusLineWidget(fakeTheme, withAtom, accountTiers, false, UNICODE_GLYPHS).render(width)[0];
+		assert.equal(termVisWidth(rendered), width - 1, `width ${width}: widget must never paint the last column`);
+	}
+	// At 30 columns the agent atom compresses to count-only (still present).
+	const countLine = buildSessionLineWithAgents(base.sessionStats, lineage, UNICODE_GLYPHS, "count")!;
+	const narrow = new StatusLineWidget(fakeTheme, countLine, accountTiers, false, UNICODE_GLYPHS).render(30)[0];
+	assert.ok(stripAnsi(narrow).includes("⌁ 3 ag"), "count-only agent atom survives at 30 columns");
+	assert.ok(!stripAnsi(narrow).includes("12.4 hc · 3 ag"), "full atom compressed away");
+}
 
 // ── hideAuthExpiry: coercion + render suppression ──
 {

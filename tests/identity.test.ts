@@ -14,6 +14,7 @@ import {
 	API_KEY_ENV,
 	API_NAME,
 	IDENTIFIERS,
+	LEDGER_SHARD_PREFIX,
 	PRISM_ENTRY_TYPE,
 	PROVIDER_ID,
 	STATUS_COMMAND,
@@ -64,6 +65,19 @@ test("the specific shared surfaces differ from the official registration", () =>
 	assert.notEqual(STATUS_KEY_SESSION, "hyper");
 	assert.notEqual(STATUS_KEY_ACCOUNT, "hyper");
 	assert.notEqual(WIDGET_KEY, "hyper");
+});
+
+test("the usage-ledger shard prefix stays namespaced and unique", () => {
+	// On-disk persisted surface: shard files live in the shared agent cache
+	// dir, exactly where the official provider writes its own cache files.
+	assert.equal(LEDGER_SHARD_PREFIX, PROVIDER_ID + "-usage");
+	assert.ok(LEDGER_SHARD_PREFIX.startsWith(PROVIDER_ID));
+	assert.ok(IDENTIFIERS.includes(LEDGER_SHARD_PREFIX), "shard prefix registered in IDENTIFIERS");
+	assert.ok(!OFFICIAL_RESERVED.includes(LEDGER_SHARD_PREFIX));
+	// Shard names derive from the prefix so every file this extension writes
+	// stays inside the namespace without re-hardcoding it per callsite.
+	assert.ok("hypercharm-usage-20260919.jsonl".startsWith(LEDGER_SHARD_PREFIX));
+	assert.ok(!"hyper-usage-20260919.jsonl".startsWith(LEDGER_SHARD_PREFIX));
 });
 
 test("status and widget keys stay disjoint so pi cannot cross-clear them", () => {
