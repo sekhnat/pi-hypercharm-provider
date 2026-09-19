@@ -9,7 +9,7 @@
  * official provider's identifier surface (tests/fixtures/official-surface.ts).
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
@@ -155,6 +155,11 @@ async function load(options = {}) {
 	// the extension session path is part of what this suite verifies.
 	const runner = session.extensionRunner;
 	await runner.emit({ type: "session_start", reason: "startup" });
+	// The complete provider refreshes only when pi's runtime policy permits
+	// network; emulate pi's startup refresh phase when the test asks for it.
+	if (options.allowCatalogNetwork) {
+		await runtime.refresh({ allowNetwork: true, providers: ["hypercharm"] });
+	}
 	return { credentials, runtime, loader, session, sessionManager, runner };
 }
 
@@ -183,7 +188,16 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 	const stderr = captureStderr();
 	let harness;
 	try {
-		harness = await load();
+		let fetchCalls = 0;
+		harness = await load({
+			fetchImpl: async () => {
+				fetchCalls += 1;
+				throw new Error("network disabled in tests");
+			},
+		});
+		// Cache-only startup: pi's policy disallows network, so the provider
+		// restores local state without any catalog request.
+		assert.equal(fetchCalls, 0, "cache-only startup must not touch the network");
 
 		const embedded = harness.runtime.getModel("hypercharm", "deepseek-v4-flash");
 		assert.ok(embedded, "embedded catalog must register without any network");
@@ -220,7 +234,10 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 		assert.ok(commandNames.includes("hypercharm-status"), "namespaced status command registered");
 		assert.equal(commandNames.includes("hyper-status"), false, "must not register the official command");
 
-		// Failures are surfaced, not swallowed.
+		// Failures are surfaced, not swallowed: a permitted network refresh that
+		// fails warns once and keeps serving the embedded catalog.
+		await harness.runtime.refresh({ allowNetwork: true, providers: ["hypercharm"] });
+		assert.ok(harness.runtime.getModel("hypercharm", "deepseek-v4-flash"), "embedded catalog still serves after the failure");
 		const warning = await waitFor("catalog failure warning", () =>
 			stderr.chunks.find((chunk) => chunk.includes("model catalog")),
 		);
@@ -244,7 +261,7 @@ test("refreshes from /v1/provider, caches the catalog, and retains it when refre
 		});
 	};
 
-	const first = await load({ fetchImpl: catalogOk });
+	const first = await load({ fetchImpl: catalogOk, allowCatalogNetwork: true });
 	try {
 		const model = await waitFor("hot-swapped fixture model", () => first.runtime.getModel("hypercharm", "fixture-model"));
 		assert.equal(model.contextWindow, 8192);
@@ -255,22 +272,29 @@ test("refreshes from /v1/provider, caches the catalog, and retains it when refre
 		assert.equal(model.compat.supportsReasoningEffort, false);
 		assert.ok(requests.length >= 1, "the catalog endpoint must be the refresh source");
 
-		const cachePath = path.join(agentDir, "cache", "hypercharm-models.json");
-		const cached = JSON.parse(readFileSync(cachePath, "utf8"));
-		// The fork writes a version-stamped envelope ({ version, embeddedHash, models })
-		// instead of upstream's legacy bare array; assert the envelope shape.
-		assert.ok(cached && !Array.isArray(cached) && typeof cached === "object", "catalog cache written as the version-stamped envelope");
-		assert.equal(typeof cached.version, "string", "envelope records the writing version");
-		assert.equal(typeof cached.embeddedHash, "string", "envelope records the embedded catalog hash");
-		assert.ok(Array.isArray(cached.models), "envelope holds the models array");
-		assert.ok(cached.models.some((entry) => entry.id === "fixture-model"), "cache holds the refreshed catalog");
+		// Successful refreshes persist through pi's standard model store — the
+		// namespaced legacy cache is read-only now and must stay untouched.
+		const storePath = path.join(agentDir, "models-store.json");
+		const stored = JSON.parse(readFileSync(storePath, "utf8"));
+		assert.ok(stored && typeof stored === "object" && !Array.isArray(stored), "pi model store written as a provider-keyed object");
+		const entry = stored.hypercharm;
+		assert.ok(entry, "pi's model store holds the hypercharm catalog");
+		assert.ok(Array.isArray(entry.models), "store entry holds the models array");
+		assert.ok(entry.models.some((m) => m.id === "fixture-model"), "store holds the refreshed catalog");
+		for (const m of entry.models) {
+			assert.equal(m.provider, "hypercharm", "persisted models keep the namespaced provider");
+			assert.equal(m.api, "hypercharm", "persisted models keep the namespaced custom api");
+		}
+		assert.equal(existsSync(path.join(agentDir, "cache", "hypercharm-models.json")), false, "no manual legacy-cache writes after native publication");
 	} finally {
 		first.session.dispose();
 	}
 
-	// A later session keeps serving the cached catalog even though Hyper is down.
+	// A later session keeps serving the persisted catalog even though Hyper is
+	// down: registration restores it cache-only, and the failing refresh
+	// retains it.
 	const stderr = captureStderr();
-	const second = await load({ fetchImpl: async () => new Response("Unavailable", { status: 503 }) });
+	const second = await load({ fetchImpl: async () => new Response("Unavailable", { status: 503 }), allowCatalogNetwork: true });
 	try {
 		assert.ok(second.runtime.getModel("hypercharm", "fixture-model"), "cached catalog retained across a failed refresh");
 		const warning = await waitFor("failed refresh warning", () => stderr.chunks.find((chunk) => chunk.includes("HTTP 503")));
@@ -412,6 +436,22 @@ test("co-installs with the official identifier surface without interference", as
 		assert.ok(harness.runner.getEntryRenderer(PRISM_ENTRY_TYPE));
 		assert.ok(harness.runner.getEntryRenderer("hyper-prism-route"));
 
+		// Auth/registration surfaces stay disjoint after the native-provider
+		// migration: ours registers as a complete native provider under
+		// "hypercharm" (stored key over HYPERCHARM_API_KEY), the official fixture
+		// keeps its own legacy registration and credential namespace.
+		const nativeProvider = harness.runtime.getRegisteredNativeProvider("hypercharm");
+		assert.ok(nativeProvider, "hypercharm registers as a complete native provider");
+		assert.equal(nativeProvider.id, "hypercharm");
+		assert.equal(nativeProvider.auth.oauth?.name, "HyperCharm");
+		assert.ok(nativeProvider.auth.apiKey, "hypercharm keeps api-key auth");
+		assert.equal(harness.runtime.getRegisteredNativeProvider("hyper"), undefined, "the official fixture stays a legacy registration");
+		assert.ok(harness.runtime.getRegisteredProviderConfig("hyper"), "the official fixture owns its legacy config");
+		const oursCredential = await harness.credentials.read("hypercharm");
+		assert.equal(oursCredential?.type, "api_key");
+		const officialCredential = await harness.credentials.read("hyper");
+		assert.equal(officialCredential, undefined, "the official surface owns no hypercharm credential");
+
 		// Status writes stay in their own namespaces: neither extension can
 		// cross-clear the other's footer slots.
 		const ui = captureUI(harness.runner);
@@ -448,7 +488,7 @@ test("status command: authexpiry hides the device-session expiry atom end to end
 
 	// The fake Atelier host makes the sidebar panel publish; account rows land
 	// from the session-start prefetch with no turn activity needed.
-	const harness = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath] });
+	const harness = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath], allowCatalogNetwork: true });
 	try {
 		const notifications = [];
 		const ui: any = {
@@ -544,7 +584,7 @@ test("status command: authexpiry hides the device-session expiry atom end to end
 		// the expiry row.
 		const busMark = ((globalThis as any).__atelierHostBusEvents as any[]).length;
 		await harness.session.dispose();
-		const restarted = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath] });
+		const restarted = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath], allowCatalogNetwork: true });
 		try {
 			// The re-run fixture factory rebinds the discover trigger to the new
 			// loader's bus; the restarted publisher needs its own announce.
@@ -637,7 +677,7 @@ test("fabric child mode: one ledger record per turn, zero account fetches", asyn
 				headers: { "content-type": "text/event-stream" },
 			});
 		};
-		const harness = await load({ fetchImpl });
+		const harness = await load({ fetchImpl, allowCatalogNetwork: true });
 		try {
 			// A committed turn appends exactly one record with the child identity.
 			// Drive a real prompt through the session — pi routes it through the
@@ -665,7 +705,7 @@ test("fabric child mode: one ledger record per turn, zero account fetches", asyn
 		}
 
 		// A turn without HyperCharm usage writes nothing (fresh session, no stream).
-		const harness2 = await load({ fetchImpl });
+		const harness2 = await load({ fetchImpl, allowCatalogNetwork: true });
 		try {
 			await harness2.runner.emit({ type: "turn_start", turnIndex: 0, timestamp: 2 });
 			await harness2.runner.emit({ type: "turn_end", turnIndex: 0, message: { ...assistantMessage(), provider: "other" }, toolResults: [] });
@@ -700,7 +740,7 @@ test("parent aggregation and drift window from real tool_execution_start", async
 			}
 			throw new Error("unexpected fetch in parent probe: " + url);
 		};
-		harness = await load({ fetchImpl });
+		harness = await load({ fetchImpl, allowCatalogNetwork: true });
 		const sid = harness.sessionManager.getSessionId();
 		const ownLineage = `session:${sid}`;
 		writeLedgerFixture([
@@ -781,7 +821,7 @@ function ceilingFetch(chatBodies) {
 
 test("streamSimple delegation sends the model-derived max_tokens ceiling and normalized reasoning", async () => {
 	const chatBodies = [];
-	const harness = await load({ fetchImpl: ceilingFetch(chatBodies) });
+	const harness = await load({ fetchImpl: ceilingFetch(chatBodies), allowCatalogNetwork: true });
 	try {
 		const model = await waitFor("ceiling fixture model", () => harness.runtime.getModel("hypercharm", "ceiling-model"));
 		// The registered model keeps its HyperCharm identity; only the delegated
@@ -820,7 +860,7 @@ test("streamSimple delegation sends the model-derived max_tokens ceiling and nor
 
 test("streamSimple delegation preserves an explicit caller maxTokens over the model ceiling", async () => {
 	const chatBodies = [];
-	const harness = await load({ fetchImpl: ceilingFetch(chatBodies) });
+	const harness = await load({ fetchImpl: ceilingFetch(chatBodies), allowCatalogNetwork: true });
 	try {
 		const model = await waitFor("ceiling fixture model", () => harness.runtime.getModel("hypercharm", "ceiling-model"));
 		await harness.session.setModel(model);
@@ -859,7 +899,7 @@ test("streamSimple delegation context-clamps the ceiling below the registered ma
 		}
 		return ceilingFetch(chatBodies)(input, init);
 	};
-	const harness = await load({ fetchImpl });
+	const harness = await load({ fetchImpl, allowCatalogNetwork: true });
 	try {
 		const model = await waitFor("cramped fixture model", () => harness.runtime.getModel("hypercharm", "cramped-model"));
 		assert.equal(model.maxTokens, 131072);

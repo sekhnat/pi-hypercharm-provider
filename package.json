@@ -8,8 +8,8 @@
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit && npm run smoke && npm test",
-    "smoke": "node tests/status.smoke.ts && bun run tests/sidebar-publish.smoke.ts && node tests/models.smoke.ts && node tests/oauth.smoke.ts && node tests/update-models.smoke.ts && node tests/sidebar.smoke.ts && bun run tests/routing.smoke.ts",
-    "test": "node --import jiti/register --test tests/identity.test.ts tests/ledger.test.ts tests/prism.test.ts tests/notify.test.ts tests/provider.integration.test.ts",
+    "smoke": "node tests/status.smoke.ts && bun run tests/sidebar-publish.smoke.ts && node --import jiti/register tests/models.smoke.ts && node tests/update-models.smoke.ts && node tests/sidebar.smoke.ts && bun run tests/routing.smoke.ts",
+    "test": "node --import jiti/register --test tests/hyper.test.ts tests/schema.test.ts tests/http.test.ts tests/oauth.test.ts tests/account.test.ts tests/identity.test.ts tests/ledger.test.ts tests/prism.test.ts tests/notify.test.ts tests/provider.integration.test.ts",
     "update-models": "node scripts/update-models.js"
   },
   "keywords": [
@@ -33,7 +33,10 @@
     "node": ">=23"
   },
   "peerDependencies": {
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.85.1",
@@ -41,7 +44,8 @@
     "@earendil-works/pi-tui": "0.85.1",
     "@types/node": "^24.10.1",
     "jiti": "2.7.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "typebox": "1.3.7"
   },
   "author": "",
   "license": "MIT",

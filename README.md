@@ -16,10 +16,13 @@ _Hyperoptimized coding models — DeepSeek, GLM, Kimi, Qwen, MiniMax, Gemma, GPT
 ## Features
 
 - **34+ AI Models** including DeepSeek V4 Flash/Pro, GLM 5/5.1, Kimi K2.5/K2.6, Qwen3.6/3.7, MiniMax M2.7, Gemma 4, GPT-OSS, and Llama
+- **Complete Native Provider** — registers once as a full pi provider that owns authentication, model restoration/refresh, and the custom streaming interceptor; sessions never re-register it
+- **Pi-Managed Catalog Persistence** — refreshed catalogs persist through pi's standard model store and restore transactionally on startup; the extension's own cache remains a read-only rollback fallback
 - **DeepSeek Native Thinking** — Uses the `deepseek` thinking format for Charm Hyper requests, with native `reasoning_effort` on models that publish levels
 - **OpenAI-compatible API** via Charm Hyper's `/v1/chat/completions` endpoint
-- **OAuth Device Flow** — sign in with `/login` under the `hypercharm` provider (independent of the official provider's `hyper` registration)
-- **Official Catalog Sync** from Charm's typed `/v1/provider` endpoint, matching `@charmland/pi-hyper-provider`
+- **Hardened OAuth Device Flow** — sign in with `/login` under the `hypercharm` provider (independent of the official provider's `hyper` registration): server-directed polling cadence, `slow_down` handling, buffered token expiry, refresh-token rotation, and validated responses end to end
+- **Credential-Scoped Account Status** — balance, team, and device-session lookups coalesce concurrent refreshes, back off transient failures with server `Retry-After` support, and never mix data across credentials
+- **Official Catalog Sync** from Charm's typed `/v1/provider` endpoint, matching `@charmland/pi-hyper-provider`, with strict validation: a malformed live catalog is rejected atomically and the last good catalog keeps serving
 - **Reasoning Models** with provider-published on/off states and exact effort levels
 - **Attachment Support** for models the official catalog marks as attachment-capable
 
@@ -210,7 +213,7 @@ exact choice.
 
 The HyperCharm API key can be configured in multiple ways (resolved in this order):
 
-1. **OAuth** — Run `pi`, send `/login`, and pick **HyperCharm**. This uses Hyper's device flow (open the verification URL, enter the code) and stores a refreshable OAuth credential under the `hypercharm` provider — fully independent of the official `@charmland/pi-hyper-provider` (`hyper`) registration, so both extensions can be installed side by side.
+1. **OAuth** — Run `pi`, send `/login`, and pick **HyperCharm**. This uses Hyper's device flow (open the verification URL, enter the code) and stores a refreshable OAuth credential under the `hypercharm` provider — fully independent of the official `@charmland/pi-hyper-provider` (`hyper`) registration, so both extensions can be installed side by side. The flow follows Hyper's advertised polling cadence, honors `slow_down`, buffers token expiry by the lesser of 30 seconds or half the token lifetime, keeps team metadata across refreshes, and only asks you to re-authenticate when Hyper confirms the refresh token no longer exists. Every request runs through a shared, timeout-bounded HTTP client that validates responses before they touch credentials, models, or status state.
 2. **`auth.json`** (recommended for API keys) — Add to `~/.pi/agent/auth.json`:
    ```json
    { "hypercharm": { "type": "api_key", "key": "your-api-key" } }
@@ -238,6 +241,22 @@ Add to your pi configuration for automatic loading:
   ]
 }
 ```
+
+### Catalog Persistence and Refresh
+
+The extension registers `hypercharm` as a complete pi provider. On startup it
+serves a usable catalog immediately from this release's embedded snapshot,
+reconciled with the extension's legacy cache (read-only rollback input). Pi's
+standard provider model store is the primary persisted catalog:
+
+- a valid stored catalog is restored transactionally before any network refresh;
+- when pi's runtime policy permits network access and a credential is
+  available, `/v1/provider` is fetched, validated, curated through the
+  embedded/patch/custom/deprecation pipeline, and published atomically to both
+  the in-memory snapshot and pi's model store;
+- a failed, cancelled, empty, or schema-invalid refresh keeps the previously
+  usable catalog — models are never unregistered and startup never depends on
+  the network.
 
 ### Catalog and Compat Settings
 

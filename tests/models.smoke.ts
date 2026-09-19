@@ -349,3 +349,74 @@ assert.equal(parseModelsCache({ models: "x" }), null);
 }
 
 console.log("models.smoke: all assertions passed");
+
+// ── provider.ts: strict live-catalog schema + JsonModel<->Model adapters ──
+import { parseProviderCatalog, payloadToJsonModel, toRuntimeModel, toJsonModel } from "../provider.ts";
+import { HYPER_API_URL, USER_AGENT } from "../hyper.ts";
+import { API_NAME, PROVIDER_ID } from "../identity.ts";
+
+const validPayloadModel = {
+	id: "live-model",
+	name: "Live Model",
+	cost_per_1m_in: 0.5,
+	cost_per_1m_out: 2,
+	cost_per_1m_in_cached: 0.1,
+	cost_per_1m_out_cached: 0.05,
+	context_window: 262144,
+	default_max_tokens: 8192,
+	can_reason: true,
+	reasoning_levels: ["off", "low"],
+	supports_attachments: true,
+};
+
+// Valid official fields parse into model payloads.
+const parsed = parseProviderCatalog({ models: [validPayloadModel] });
+assert.ok(parsed, "a valid official payload parses");
+assert.equal(parsed!.length, 1);
+
+// Unknown additive fields stay accepted (forward compatibility).
+const additive = parseProviderCatalog({
+	models: [{ ...validPayloadModel, brand_new_field: { nested: true } }],
+	deployment_hint: "canary",
+});
+assert.ok(additive, "unknown additive fields are accepted");
+
+// Malformed required fields reject the ENTIRE payload.
+for (const broken of [
+	{}, // no models array
+	{ models: [] }, // empty catalog is a refresh failure
+	{ models: [{ ...validPayloadModel, id: "" }] },
+	{ models: [{ ...validPayloadModel, name: "" }] },
+	{ models: [{ ...validPayloadModel, cost_per_1m_in: -1 }] },
+	{ models: [{ ...validPayloadModel, context_window: 0 }] },
+	{ models: [{ ...validPayloadModel, can_reason: "yes" }] },
+	{ models: [{ ...validPayloadModel, supports_attachments: undefined }] },
+	{ models: [validPayloadModel, { ...validPayloadModel, id: "" }] }, // one bad entry fails all
+]) {
+	assert.equal(parseProviderCatalog(broken), undefined, "payload must reject: " + JSON.stringify(broken).slice(0, 80));
+}
+
+// payloadToJsonModel routes through the shared curation transform.
+const curated = payloadToJsonModel(parsed![0])!;
+assert.equal(curated.id, "live-model");
+assert.equal(curated.reasoning, true);
+assert.equal(curated.maxTokens, 8192);
+assert.equal(curated.compat!.maxTokensField, "max_tokens");
+assert.equal(curated.compat!.thinkingFormat, "deepseek");
+assert.equal(curated.thinkingLevelMap!.low, "low");
+assert.equal(payloadToJsonModel({ ...validPayloadModel, default_max_tokens: undefined })!.maxTokens, 262144, "context-window fallback");
+
+// Round-trip: JsonModel -> runtime Model -> JsonModel is lossless for the pure
+// shape, and the runtime model carries the namespaced identity.
+const runtime = toRuntimeModel(curated);
+assert.equal(runtime.api, API_NAME, "runtime models use the namespaced custom api");
+assert.equal(runtime.provider, PROVIDER_ID);
+assert.equal(runtime.baseUrl, HYPER_API_URL);
+assert.equal(runtime.headers!["User-Agent"], USER_AGENT, "versioned user agent rides the model");
+assert.deepEqual(toJsonModel(runtime), curated);
+
+// A stored/graveyard entry can never smuggle a foreign provider or api in.
+const projected = toJsonModel({ ...runtime, provider: "hyper", api: "openai-completions" });
+const again = toRuntimeModel(projected);
+assert.equal(again.provider, PROVIDER_ID, "projection re-stamps the namespaced provider");
+assert.equal(again.api, API_NAME, "projection re-stamps the namespaced api");
