@@ -27,12 +27,12 @@ import { envApiKeyAuth, lazyOAuth } from "@earendil-works/pi-ai";
 import type {
 	Api,
 	AssistantMessageEventStream,
-	Context,
 	Model,
 	Provider,
 	ProviderStreams,
 	RefreshModelsContext,
 	SimpleStreamOptions,
+	TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -163,7 +163,7 @@ export function payloadToJsonModel(model: ProviderModelPayload): JsonModel | nul
 
 export type StreamSimpleFn = (
 	model: Model<Api>,
-	context: Context,
+	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
