@@ -133,8 +133,8 @@
       "low": "low",
       "medium": null,
       "high": "high",
-      "xhigh": null,
-      "max": "max"
+      "xhigh": "xhigh",
+      "max": null
     },
     "input": [
       "text",
@@ -146,7 +146,7 @@
       "cacheRead": 0.03,
       "cacheWrite": 0
     },
-    "contextWindow": 1000000,
+    "contextWindow": 1048576,
     "maxTokens": 32768,
     "compat": {
       "supportsStore": false,
