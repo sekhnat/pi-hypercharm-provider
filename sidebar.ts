@@ -120,7 +120,7 @@ function isDiscoveryEvent(value: unknown): value is SidebarPanelDiscoveryEvent {
 export function createSidebarUsagePublisher(
 	events: EventTransport,
 	panelId: SidebarPanelContribution["id"],
-	options: { source?: string } = {},
+	options: { source?: string; onCompatibilityChange?: (compatible: boolean) => void } = {},
 ): SidebarUsagePublisher {
 	const source = options.source ?? (panelId.includes(":") ? panelId.slice(0, panelId.indexOf(":")) : panelId);
 	let current: SidebarPanelContribution | undefined;
@@ -152,10 +152,13 @@ export function createSidebarUsagePublisher(
 
 	const unsubscribe = events.on(SIDEBAR_PANEL_EVENT_CHANNEL, (data: unknown) => {
 		if (disposed || !isDiscoveryEvent(data)) return;
+		const wasCompatible = compatible;
 		compatible =
 			Array.isArray(data.capabilities) && data.capabilities.includes(SIDEBAR_PANEL_DEFAULTS_CAPABILITY);
-		if (!compatible) return;
-		emitRegister(data.requestId);
+		if (compatible) emitRegister(data.requestId);
+		// Atelier creates its registry after asynchronous session initialization.
+		// A previous render may have installed the fallback widget before discovery.
+		if (compatible !== wasCompatible) options.onCompatibilityChange?.(compatible);
 	});
 
 	return {

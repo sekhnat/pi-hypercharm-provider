@@ -752,7 +752,13 @@ const NoopEventTransport = {
 } satisfies Pick<EventTransport, "on" | "emit">;
 
 function initSidebarPublisher(pi: ExtensionAPI): void {
-	sidebarPublisher = createSidebarUsagePublisher(pi.events, "hypercharm:usage");
+	sidebarPublisher = createSidebarUsagePublisher(pi.events, "hypercharm:usage", {
+		onCompatibilityChange: () => {
+			// Factory subscriptions outlive session initialization; re-route any
+			// fallback rendered before Atelier's asynchronous discovery arrived.
+			if (accountCtx) updateStatus(accountCtx);
+		},
+	});
 }
 
 const publisher = (): SidebarUsagePublisher =>
@@ -1198,9 +1204,9 @@ export default function (pi: ExtensionAPI) {
 	let collectingPrismRoute = false;
 	let prismRoute: PrismRoute | undefined;
 
-	// Subscribe to sidebar discovery at factory time: Pi completes extension
-	// factory initialization before dispatching session lifecycle events, so
-	// this observes Atelier's discovery regardless of load order.
+	// Subscribe at factory time so Atelier's later session_start discovery is
+	// observed regardless of extension load order. Discovery can arrive after
+	// our first render; the compatibility callback then clears the fallback.
 	initSidebarPublisher(pi);
 
 	// The complete hypercharm provider registers ONCE at factory time: it owns
