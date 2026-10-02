@@ -136,7 +136,14 @@ async function load(options = {}) {
 		noThemes: true,
 		noContextFiles: true,
 	});
-	await loader.reload();
+	// Pin only catalog loading, not timeout clocks or subsequent provider work.
+	const now = Date.now;
+	try {
+		if (options.catalogNow !== undefined) Date.now = () => options.catalogNow;
+		await loader.reload();
+	} finally {
+		Date.now = now;
+	}
 	assert.deepEqual(loader.getExtensions().errors, [], "extension must load without errors");
 
 	const sessionManager = options.sessionFile
@@ -160,7 +167,22 @@ async function load(options = {}) {
 	if (options.allowCatalogNetwork) {
 		await runtime.refresh({ allowNetwork: true, providers: ["hypercharm"] });
 	}
-	return { credentials, runtime, loader, session, sessionManager, runner };
+	return {
+		credentials,
+		runtime,
+		loader,
+		session,
+		sessionManager,
+		runner,
+		// Emit shutdown like the pi CLI does before the session is disposed.
+		async shutdown() {
+			try {
+				await runner.emit({ type: "session_shutdown", reason: "quit" });
+			} finally {
+				session.dispose();
+			}
+		},
+	};
 }
 
 function assistantMessage(overrides = {}) {
@@ -188,8 +210,13 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 	const stderr = captureStderr();
 	let harness;
 	try {
+		// Evaluate the grace window one day after the newest deprecation so the
+		// result does not depend on today's date.
+		const graveyard = Object.values(JSON.parse(readFileSync(deprecatedModelsPath, "utf8")));
+		const graceNow = Math.max(...graveyard.map((entry) => Date.parse(entry.deprecatedAt))) + 24 * 60 * 60 * 1000;
 		let fetchCalls = 0;
 		harness = await load({
+			catalogNow: graceNow,
 			fetchImpl: async () => {
 				fetchCalls += 1;
 				throw new Error("network disabled in tests");
@@ -207,7 +234,7 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 		assert.equal(EMBEDDED_AUTHORITY_NOTE, "tests must run against the embedded catalog");
 
 		// Deprecated grace: entries inside the 14-day TTL are still served,
-		// entries past it are evicted. Derived from the data, not today's date.
+		// entries past it are evicted. Derived from the data (graceNow), not today's date.
 		const deprecated = JSON.parse(readFileSync(deprecatedModelsPath, "utf8"));
 		const embeddedIds = new Set(
 			(Array.isArray(JSON.parse(readFileSync(embeddedModelsPath, "utf8")))
@@ -216,8 +243,8 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 			).map((model) => model.id),
 		);
 		const deprecatedOnly = Object.values(deprecated).filter((entry) => !embeddedIds.has(entry.id));
-		const fresh = deprecatedOnly.filter((entry) => Date.now() - Date.parse(entry.deprecatedAt) <= DEPRECATED_TTL_MS);
-		const stale = deprecatedOnly.filter((entry) => Date.now() - Date.parse(entry.deprecatedAt) > DEPRECATED_TTL_MS);
+		const fresh = deprecatedOnly.filter((entry) => graceNow - Date.parse(entry.deprecatedAt) <= DEPRECATED_TTL_MS);
+		const stale = deprecatedOnly.filter((entry) => graceNow - Date.parse(entry.deprecatedAt) > DEPRECATED_TTL_MS);
 		assert.ok(fresh.length > 0, "expected at least one model inside the deprecated grace window");
 		for (const entry of fresh) {
 			assert.ok(harness.runtime.getModel("hypercharm", entry.id), entry.id + " must be served during its grace period");
@@ -244,7 +271,7 @@ test("loads offline: embedded catalog, deprecated grace, namespaced registration
 		assert.match(warning, /network disabled/);
 	} finally {
 		stderr.restore();
-		harness?.session.dispose();
+		await harness?.shutdown();
 	}
 });
 
@@ -287,7 +314,7 @@ test("refreshes from /v1/provider, caches the catalog, and retains it when refre
 		}
 		assert.equal(existsSync(path.join(agentDir, "cache", "hypercharm-models.json")), false, "no manual legacy-cache writes after native publication");
 	} finally {
-		first.session.dispose();
+		await first.shutdown();
 	}
 
 	// A later session keeps serving the persisted catalog even though Hyper is
@@ -301,7 +328,7 @@ test("refreshes from /v1/provider, caches the catalog, and retains it when refre
 		assert.match(warning, /model catalog/);
 	} finally {
 		stderr.restore();
-		second.session.dispose();
+		await second.shutdown();
 	}
 });
 
@@ -389,7 +416,7 @@ test("records prism routing as durable session entries", async () => {
 		// renderer registration both survive.
 		const sessionFile = sessionManager.getSessionFile();
 		assert.ok(sessionFile);
-		harness.session.dispose();
+		await harness.shutdown();
 		disposed = true;
 
 		const restored = await load({ sessionFile });
@@ -410,10 +437,10 @@ test("records prism routing as durable session entries", async () => {
 			assert.ok(restoredComponent);
 			assert.ok(restoredComponent.render(80).join("\n").includes("Prism \u2192 GLM 5.3 Flash"));
 		} finally {
-			restored.session.dispose();
+			await restored.shutdown();
 		}
 	} finally {
-		if (!disposed) harness.session.dispose();
+		if (!disposed) await harness.shutdown();
 	}
 });
 
@@ -465,7 +492,7 @@ test("co-installs with the official identifier surface without interference", as
 		}
 		assert.equal(ui.statusKeys.includes("hyper") && ownKeys.includes("hyper"), false);
 	} finally {
-		harness.session.dispose();
+		await harness.shutdown();
 	}
 });
 
@@ -583,7 +610,7 @@ test("status command: authexpiry hides the device-session expiry atom end to end
 		// persisted choice from hypercharm.json and publishes its panel without
 		// the expiry row.
 		const busMark = ((globalThis as any).__atelierHostBusEvents as any[]).length;
-		await harness.session.dispose();
+		await harness.shutdown();
 		const restarted = await load({ fetchImpl: hyperFetch, extensionPaths: [extensionPath, atelierHostPath], allowCatalogNetwork: true });
 		try {
 			// The re-run fixture factory rebinds the discover trigger to the new
@@ -608,11 +635,11 @@ test("status command: authexpiry hides the device-session expiry atom end to end
 			await restartedCommand.handler("reset", { hasUI: true, ui } as any);
 			assert.equal(readConfig().hideAuthExpiry, false);
 		} finally {
-			restarted.session.dispose();
+			await restarted.shutdown();
 		}
 	} finally {
 		try {
-			harness.session.dispose();
+			await harness.shutdown();
 		} catch {
 			// Already disposed before the restart phase.
 		}
@@ -701,7 +728,7 @@ test("fabric child mode: one ledger record per turn, zero account fetches", asyn
 			assert.equal(accountFetches.length, 0, "child makes no /credits, /teams, or /devices calls: " + JSON.stringify(accountFetches));
 		} finally {
 			await settlePromises();
-			harness.session.dispose();
+			await harness.shutdown();
 		}
 
 		// A turn without HyperCharm usage writes nothing (fresh session, no stream).
@@ -712,7 +739,7 @@ test("fabric child mode: one ledger record per turn, zero account fetches", asyn
 			assert.equal(ledgerLines().length, 1, "no additional record without observed usage");
 		} finally {
 			await settlePromises();
-			harness2.session.dispose();
+			await harness2.shutdown();
 		}
 	} finally {
 		delete process.env.PI_FABRIC_PARENT_RUN;
@@ -774,7 +801,7 @@ test("parent aggregation and drift window from real tool_execution_start", async
 		assert.ok(true, "drift window armed through a real tool_execution_start");
 	} finally {
 		await settlePromises();
-		harness?.session.dispose();
+		await harness?.shutdown();
 	}
 });
 
@@ -854,7 +881,7 @@ test("streamSimple delegation sends the model-derived max_tokens ceiling and nor
 		void auth;
 	} finally {
 		await settlePromises();
-		harness.session.dispose();
+		await harness.shutdown();
 	}
 });
 
@@ -880,7 +907,7 @@ test("streamSimple delegation preserves an explicit caller maxTokens over the mo
 		assert.equal(body.max_completion_tokens, undefined);
 	} finally {
 		await settlePromises();
-		harness.session.dispose();
+		await harness.shutdown();
 	}
 });
 
@@ -915,6 +942,6 @@ test("streamSimple delegation context-clamps the ceiling below the registered ma
 		assert.equal(body.max_completion_tokens, undefined);
 	} finally {
 		await settlePromises();
-		harness.session.dispose();
+		await harness.shutdown();
 	}
 });

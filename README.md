@@ -13,6 +13,13 @@ _Hyperoptimized coding models — DeepSeek, GLM, Kimi, Qwen, MiniMax, Gemma, GPT
 
 ---
 
+## Pi 1.0 compatibility
+
+Tested with Pi **1.0.0**. Host-provided packages (`pi-ai`, `pi-coding-agent`, `pi-tui`, `typebox`) are wildcard peers and are never bundled; development uses exact SDK pins.
+Run `npm run test:pi` for offline manifest, catalog, lifecycle and streaming checks. To test an installed host, set `PI1_HOST_PACKAGE` to its package directory; add `PI1_HOST_ENTRY=bundle` for its bundled CLI runtime. The probe stubs all network requests and never uses a live provider endpoint.
+
+---
+
 ## Features
 
 - **34+ AI Models** including DeepSeek V4 Flash/Pro, GLM 5/5.1, Kimi K2.5/K2.6, Qwen3.6/3.7, MiniMax M2.7, Gemma 4, GPT-OSS, and Llama

@@ -31,3 +31,6 @@ jobs:
 
       - name: Typecheck and smoke tests
         run: bun run check
+
+      - name: Pi host compatibility probe (offline)
+        run: bun run test:pi

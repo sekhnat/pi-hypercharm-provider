@@ -864,9 +864,12 @@ function renderStatus(ctx: ExtensionContext): void {
 	// compatible host, sidebar parts fall back to the widget below. Each
 	// metric lands in exactly one destination because routing switches on the
 	// part's mode (buildSidebarPanel enforces this).
-	const sidebarCompatible = publisher().isCompatible() && isHyperCharmActive;
+	// The fallback depends only on whether a sidebar host exists: while another
+	// provider is active the panel is withdrawn, and its parts must not
+	// reappear in the footer instead.
+	const sidebarHostPresent = publisher().isCompatible();
 	const panel = buildSidebarPanel({
-		compatible: publisher().isCompatible(),
+		compatible: sidebarHostPresent,
 		isProviderActive: isHyperCharmActive,
 		sessionMode: statusConfig.session,
 		accountMode: statusConfig.account,
@@ -902,18 +905,19 @@ function renderStatus(ctx: ExtensionContext): void {
 	}
 
 	// Below-editor widget (two-zone, width-aware). Sidebar parts route here as
-	// their fallback when no compatible host is present; a sidebar part with a
-	// compatible host must not duplicate into the widget. The left side keeps
-	// progressive agent-atom compaction: full atom → count-only → session's
-	// own atoms only — the StatusLineWidget picks the first that fits.
+	// their fallback only when no compatible host is present; a sidebar part with
+	// a compatible host must not duplicate into the widget, whichever provider
+	// is active. The left side keeps progressive agent-atom compaction: full
+	// atom → count-only → session's own atoms only — the StatusLineWidget picks
+	// the first that fits.
 	const widgetWantsSession =
-		statusConfig.session === "widget" || (statusConfig.session === "sidebar" && !sidebarCompatible);
+		statusConfig.session === "widget" || (statusConfig.session === "sidebar" && !sidebarHostPresent);
 	const leftW = widgetWantsSession ? sessionLineW : undefined;
 	const leftTiers = widgetWantsSession
 		? [sessionLineFull, sessionLineCount, sessionLineNone].filter((s): s is string => s !== undefined)
 		: [];
 	const rightW =
-		(statusConfig.account === "widget" || (statusConfig.account === "sidebar" && !sidebarCompatible)) &&
+		(statusConfig.account === "widget" || (statusConfig.account === "sidebar" && !sidebarHostPresent)) &&
 		accountVisible
 			? accTiersW
 			: undefined;
